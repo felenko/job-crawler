@@ -6,6 +6,8 @@ Uses a headless Chromium browser (Playwright) to render JavaScript-heavy pages, 
 clicks "Open Positions / Browse Jobs / See open roles" CTAs, handles pagination, and saves each
 matching job as a Markdown file.
 
+![Job Search Browser UI](screenshot.png)
+
 ## Scraping strategies
 
 For each company the crawler auto-detects the best approach:
