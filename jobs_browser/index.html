@@ -174,11 +174,14 @@
     const progActiveName = document.getElementById('prog-active-name');
     const progRows    = document.getElementById('prog-rows');
 
+    // ── Bulk scrape state (rescrape all / errors / empty) ──────────────────────
     let pollTimer = null;
-    let scraperRunning = false;
-    let scraperStartedAt = 0;  // ms timestamp when startPolling() was called
-    let scraperMode = 'bulk';  // 'bulk' | 'single'
-    let scraperCompany = '';   // set when scraperMode === 'single'
+    let bulkScraperRunning = false;
+    let bulkStartedAt = 0;
+
+    // ── Per-company scrape state (parallel single-company scrapes) ─────────────
+    // Map<company, { timer, startedAt }>
+    const activeCompanyScrapes = new Map();
 
     // ── Utilities ─────────────────────────────────────────────────────────────
     function esc(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -190,11 +193,24 @@
       if (text) setTimeout(() => { if (msgEl.textContent === text) msgEl.textContent = ''; }, isError ? 12000 : 6000);
     }
 
-    function setButtonsDisabled(disabled) {
+    function setBulkButtonsDisabled(disabled) {
       ['btn-rescrape-all','btn-rescrape-errors','btn-rescrape-empty'].forEach(id => {
         document.getElementById(id).disabled = disabled;
       });
-      document.querySelectorAll('.btn-rescrape').forEach(b => b.disabled = disabled);
+      // Also disable all per-company buttons during a bulk operation
+      if (disabled) {
+        document.querySelectorAll('.btn-rescrape').forEach(b => b.disabled = true);
+      } else {
+        // Re-enable only companies that aren't actively scraping
+        document.querySelectorAll('.btn-rescrape').forEach(b => {
+          if (!activeCompanyScrapes.has(b.dataset.company)) b.disabled = false;
+        });
+      }
+    }
+
+    function setCompanyButtonDisabled(company, disabled) {
+      document.querySelectorAll(`.btn-rescrape[data-company="${CSS.escape(company)}"]`)
+        .forEach(b => b.disabled = disabled);
     }
 
     // ── Progress state ─────────────────────────────────────────────────────────
@@ -352,6 +368,7 @@
       if (spinnerEl) spinnerEl.style.display = modifierClass ? 'none' : '';
     }
 
+    // ── Bulk progress polling (rescrape all / errors / empty) ─────────────────
     async function pollProgress() {
       try {
         const r = await fetch('/api/progress');
@@ -359,68 +376,83 @@
         if (!data.lines || !data.lines.length) return;
 
         const state = parseProgressLines(data.lines);
+        renderProgressPanel(state, data.running);
 
-        if (scraperMode === 'bulk') {
-          // ── Bulk: drive the top progress panel ──────────────────────────────
-          renderProgressPanel(state, data.running);
-
-          document.querySelectorAll('.company').forEach(el => el.classList.remove('scraping-now'));
-          if (state.current) {
-            document.querySelectorAll('.company').forEach(el => {
-              if (el.dataset.company === state.current) el.classList.add('scraping-now');
-            });
-          }
-        } else {
-          // ── Single company: drive the inline progress strip ─────────────────
-          const card = document.querySelector(`.company[data-company="${CSS.escape(scraperCompany)}"]`);
-          if (card) card.classList.toggle('scraping-now', data.running);
-          updateCompanyProgress(scraperCompany, true, '', 'Scraping…');
+        // Highlight currently-scraping company card (skip ones handled by single-company polls)
+        document.querySelectorAll('.company').forEach(el => {
+          if (!activeCompanyScrapes.has(el.dataset.company)) el.classList.remove('scraping-now');
+        });
+        if (state.current) {
+          document.querySelectorAll('.company').forEach(el => {
+            if (el.dataset.company === state.current) el.classList.add('scraping-now');
+          });
         }
 
         if (!data.running) {
-          const elapsed = Date.now() - scraperStartedAt;
+          const elapsed = Date.now() - bulkStartedAt;
           if (!state.done && elapsed < 10000) return;
-
           stopPolling();
-          setButtonsDisabled(false);
-          scraperRunning = false;
-
-          if (state.done) {
-            if (scraperMode === 'single') {
-              // Show result in the inline strip, then reload
-              const entry = state.companies.find(e => e.name === scraperCompany);
-              let modCls = 'done', text = 'Done';
-              if (entry) {
-                if (entry.status === 'done') {
-                  text = `✓ ${entry.jobs} job${entry.jobs !== 1 ? 's' : ''} found`;
-                } else if (entry.status === 'empty') {
-                  modCls = 'empty'; text = 'No matching jobs';
-                } else if (entry.status === 'error') {
-                  modCls = 'error'; text = 'Error: ' + (entry.err || '?');
-                }
-              }
-              updateCompanyProgress(scraperCompany, true, modCls, text);
-              setTimeout(load, 1800);
-            } else {
-              setTimeout(load, 1200);
-            }
-          }
+          bulkScraperRunning = false;
+          setBulkButtonsDisabled(false);
+          if (state.done) setTimeout(load, 1200);
         }
       } catch (e) { /* server might be starting */ }
     }
 
     function startPolling() {
       stopPolling();
-      scraperRunning = true;
-      scraperStartedAt = Date.now();
-      setButtonsDisabled(true);
-      if (scraperMode === 'bulk') panel.classList.remove('collapsed');
+      bulkScraperRunning = true;
+      bulkStartedAt = Date.now();
+      setBulkButtonsDisabled(true);
+      panel.classList.remove('collapsed');
       pollTimer = setInterval(pollProgress, 1500);
       pollProgress();
     }
 
     function stopPolling() {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    // ── Per-company progress polling (parallel single-company scrapes) ─────────
+    async function pollCompanyProgress(company) {
+      const entry = activeCompanyScrapes.get(company);
+      if (!entry) return;
+      try {
+        const r = await fetch('/api/progress?job=' + encodeURIComponent(company));
+        const data = await r.json();
+        if (!data.lines || !data.lines.length) return;
+
+        const state = parseProgressLines(data.lines);
+        const card = document.querySelector(`.company[data-company="${CSS.escape(company)}"]`);
+        if (card) card.classList.toggle('scraping-now', data.running);
+        updateCompanyProgress(company, true, '', 'Scraping…');
+
+        if (!data.running) {
+          const elapsed = Date.now() - entry.startedAt;
+          if (!state.done && elapsed < 10000) return;
+
+          clearInterval(entry.timer);
+          activeCompanyScrapes.delete(company);
+          if (card) card.classList.remove('scraping-now');
+          setCompanyButtonDisabled(company, false);
+          // Re-enable bulk buttons only if no other scrapes are running
+          if (!bulkScraperRunning && activeCompanyScrapes.size === 0) {
+            setBulkButtonsDisabled(false);
+          }
+
+          if (state.done) {
+            const e = state.companies.find(e => e.name === company);
+            let modCls = 'done', text = 'Done';
+            if (e) {
+              if (e.status === 'done')        { text = `✓ ${e.jobs} job${e.jobs !== 1 ? 's' : ''} found`; }
+              else if (e.status === 'empty')  { modCls = 'empty'; text = 'No matching jobs'; }
+              else if (e.status === 'error')  { modCls = 'error'; text = 'Error: ' + (e.err || '?'); }
+            }
+            updateCompanyProgress(company, true, modCls, text);
+            setTimeout(load, 1800);
+          }
+        }
+      } catch (e) { /* ignore */ }
     }
 
     // Toggle progress panel collapse
@@ -510,7 +542,13 @@
         });
       });
 
-      if (scraperRunning) setButtonsDisabled(true);
+      // Re-apply button disabled state for any still-active scrapes
+      if (bulkScraperRunning) {
+        setBulkButtonsDisabled(true);
+      } else if (activeCompanyScrapes.size > 0) {
+        setBulkButtonsDisabled(true);
+        activeCompanyScrapes.forEach((_, c) => setCompanyButtonDisabled(c, true));
+      }
     }
 
     async function load() {
@@ -536,16 +574,13 @@
           body: JSON.stringify({ filter }),
         });
         const data = await r.json();
-        if (data.ok) {
-          scraperMode = 'bulk';
-          scraperCompany = '';
-          showMsg(data.message);
-          startPolling();
-        } else showMsg(data.message || 'Failed', true);
+        if (data.ok) { showMsg(data.message); startPolling(); }
+        else showMsg(data.message || 'Failed', true);
       } catch (e) { showMsg('Request failed: ' + e.message, true); }
     }
 
     async function rescrapeCompany(company) {
+      if (activeCompanyScrapes.has(company)) return; // already running
       try {
         const r = await fetch('/api/rescrape', {
           method: 'POST',
@@ -554,11 +589,14 @@
         });
         const data = await r.json();
         if (data.ok) {
-          scraperMode = 'single';
-          scraperCompany = company;
-          // Show spinner immediately in the card (before first poll)
+          // Show spinner immediately; disable this company's button + bulk buttons
           updateCompanyProgress(company, true, '', 'Scraping…');
-          startPolling();
+          setCompanyButtonDisabled(company, true);
+          setBulkButtonsDisabled(true);
+          // Register and start polling for this company independently
+          const timer = setInterval(() => pollCompanyProgress(company), 1500);
+          activeCompanyScrapes.set(company, { timer, startedAt: Date.now() });
+          pollCompanyProgress(company);
         } else showMsg(data.message || 'Failed', true);
       } catch (e) { showMsg('Request failed: ' + e.message, true); }
     }
@@ -626,12 +664,12 @@
     document.getElementById('btn-rescrape-errors').addEventListener('click', () => rescrape('errors'));
     document.getElementById('btn-rescrape-empty').addEventListener('click',  () => rescrape('empty'));
 
-    // On page load: check if a scrape is already running and resume polling
+    // On page load: check if a bulk scrape is already running and resume polling
     load().then(() => {
       fetch('/api/progress').then(r => r.json()).then(d => {
         if (d.running) startPolling();
         else if (d.lines && d.lines.length) {
-          // Show last completed run result (collapsed)
+          // Show last completed bulk run result (collapsed)
           const state = parseProgressLines(d.lines);
           renderProgressPanel(state, false);
           panel.classList.add('collapsed');

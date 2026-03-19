@@ -29,4 +29,4 @@ crawler.py
 READ.ME
 
 # Progress / temp files
-Jobs/.scrape_progress
+Jobs/.scrape_progress*

@@ -18,6 +18,7 @@ import atexit
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -45,7 +46,13 @@ LOG_FILE = BASE / "jobs_server.log"
 JOBS_DIR = BASE / "Jobs"
 SEEDS_FILE = BASE / "seeds_test.txt"
 CRAWLER_SCRIPT = BASE / "job_crawler.py"
-PROGRESS_FILE = JOBS_DIR / ".scrape_progress"
+PROGRESS_FILE = JOBS_DIR / ".scrape_progress"  # bulk operations
+
+
+def _company_progress_file(company: str) -> Path:
+    """Per-company progress file so multiple single-company scrapes can run in parallel."""
+    safe = re.sub(r"[^\w.-]", "_", company)[:64]
+    return JOBS_DIR / f".scrape_progress_{safe}"
 
 
 
@@ -138,14 +145,16 @@ def _start_rescrape(filter_kind: str) -> tuple[bool, str]:
 
 
 def _start_rescrape_company(company: str) -> tuple[bool, str]:
-    """Start crawler for a single company. Returns (ok, message)."""
+    """Start crawler for a single company with its own progress file (supports parallel scrapes)."""
     url = _get_company_seed_url(company)
     if not url:
         return False, f"No seed URL found for company '{company}' (no marker file with url)."
-    return _start_rescrape_entries([(company, url)], f"company {company}")
+    return _start_rescrape_entries([(company, url)], f"company {company}",
+                                   progress_file=_company_progress_file(company))
 
 
-def _start_rescrape_entries(entries: list[tuple[str, str]], label: str) -> tuple[bool, str]:
+def _start_rescrape_entries(entries: list[tuple[str, str]], label: str,
+                            progress_file: Path | None = None) -> tuple[bool, str]:
     """Start crawler with given (company, url) entries. Writes 'CompanyName, URL' seed file."""
     if not entries:
         return False, "No URLs to scrape."
@@ -169,13 +178,14 @@ def _start_rescrape_entries(entries: list[tuple[str, str]], label: str) -> tuple
     except Exception as e:
         return False, str(e)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    pf = progress_file if progress_file is not None else PROGRESS_FILE
     # Clear the progress file NOW so the UI doesn't see a stale 'done' line
     # from the previous run on the very first poll after this subprocess launches.
     try:
-        PROGRESS_FILE.write_text("", encoding="utf-8")
+        pf.write_text("", encoding="utf-8")
     except Exception:
         pass
-    progress_path = str(PROGRESS_FILE)
+    progress_path = str(pf)
     cmd = [
         sys.executable,
         str(CRAWLER_SCRIPT),
@@ -259,12 +269,14 @@ def _is_process_running(pid: int) -> bool:
 
 @app.route("/api/progress")
 def api_progress():
-    """Return current scrape progress (from .scrape_progress file) and whether scraper is still running."""
+    """Return scrape progress. ?job=CompanyName for a single company; no param for bulk."""
     out = {"running": False, "lines": [], "summary": None}
-    if not PROGRESS_FILE.is_file():
+    job = request.args.get("job", "").strip()
+    pf = _company_progress_file(job) if job else PROGRESS_FILE
+    if not pf.is_file():
         return jsonify(out)
     try:
-        raw = PROGRESS_FILE.read_text(encoding="utf-8")
+        raw = pf.read_text(encoding="utf-8")
     except Exception:
         return jsonify(out)
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
