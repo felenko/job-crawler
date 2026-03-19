@@ -1,0 +1,32 @@
+# Scraped job data — user-specific, not part of the project
+Jobs/
+
+# Personal state — applied status DB
+jobs_state.db
+
+# Browser cookies — may contain session tokens
+cookies.txt
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Unrelated crawler from a different project
+crawler.py
+READ.ME
+
+# Progress / temp files
+Jobs/.scrape_progress

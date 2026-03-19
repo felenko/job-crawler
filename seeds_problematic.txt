@@ -1,0 +1,5 @@
+# Problematic career pages – test scrapers on this small set until fixed
+# Run: python job_crawler.py seeds_problematic.txt --output Jobs --verbose
+https://openai.com/careers/search/?q=software
+https://www.uber.com/us/en/careers/list/?query=software
+https://careers.airbnb.com/positions/?_search_input=software

@@ -1,0 +1,53 @@
+# Job crawler seeds: CompanyName, URL (one per line). Rescrape button uses the URL from this file.
+# AI
+OpenAI, https://openai.com/careers/search/?q=software
+Anthropic, https://www.anthropic.com/careers#open-roles
+Databricks, https://www.databricks.com/company/careers/open-positions?search=software
+Snowflake, https://careers.snowflake.com/us/en/search-results?keywords=software
+Scale, https://scale.com/careers#open-roles
+Palantir, https://www.palantir.com/careers/#openings
+NVIDIA, https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite?keywords=software
+# Fintech / Product
+Stripe, https://stripe.com/jobs/search?query=software
+Notion, https://www.notion.so/careers#open-positions
+# Trading / Quant
+JaneStreet, https://www.janestreet.com/join-jane-street/open-roles/
+HudsonRiverTrading, https://www.hudsonrivertrading.com/careers/
+TwoSigma, https://www.twosigma.com/careers/search/?q=software
+Citadel, https://www.citadel.com/careers/open-positions/
+JumpTrading, https://www.jumptrading.com/careers/open-positions/
+DRW, https://drw.com/work-at-drw/listings/
+Optiver, https://optiver.com/working-at-optiver/career-opportunities/
+# Big Tech
+Google, https://careers.google.com/jobs/results/?q=software%20engineer&location=New%20York
+Meta, https://www.metacareers.com/jobs/?q=software
+Apple, https://jobs.apple.com/en-us/search?search=software
+Amazon, https://www.amazon.jobs/en/search?base_query=software%20engineer
+Netflix, https://jobs.netflix.com/search?q=software
+Microsoft, https://apply.careers.microsoft.com/careers/search
+Uber, https://www.uber.com/us/en/careers/list/?query=software
+Lyft, https://www.lyft.com/careers?query=software
+Airbnb, https://careers.airbnb.com/positions/?_search_input=software
+DoorDash, https://careersatdoordash.com/job-search/?keyword=software&location=remote&spage=1
+# Unicorns
+Figma, https://www.figma.com/careers/#jobs
+Roblox, https://boards.greenhouse.io/roblox
+Rippling, https://www.rippling.com/careers/open-roles
+Gusto, https://gusto.com/about/careers?search=software
+Brex, https://www.brex.com/careers#open-roles
+Ramp, https://ramp.com/careers#jobs
+Chime, https://careers.chime.com/jobs/search?query=software
+Plaid, https://plaid.com/careers/openings/?search=software
+Instacart, https://instacart.careers/current-openings/?search=software
+Coinbase, https://www.coinbase.com/careers/positions?query=software
+Block, https://careers.block.xyz/us/en/search-results?keywords=software
+# Enterprise / Infra
+Salesforce, https://careers.salesforce.com/en/jobs/?search=software
+ServiceNow, https://careers.servicenow.com/jobs?search=software
+Workday, https://workday.wd5.myworkdayjobs.com/Workday?keywords=software
+Cloudflare, https://www.cloudflare.com/careers/jobs/?search=software
+MongoDB, https://www.mongodb.com/careers/departments/engineering
+Elastic, https://www.elastic.co/careers/jobs?search=software
+Confluent, https://careers.confluent.io/search/?q=software
+Twilio, https://www.twilio.com/company/jobs#openings
+Dropbox, https://jobs.dropbox.com/all-jobs?search=software

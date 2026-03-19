@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scraped Jobs</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; font-size: 15px; line-height: 1.4; }
+    body { max-width: 960px; margin: 0 auto; padding: 1rem; background: #f8f9fa; }
+    h1 { font-size: 1.5rem; color: #1a1a1a; margin: 0 0 0.5rem; }
+
+    /* ── Sticky header ── */
+    #sticky-header {
+      position: sticky; top: 0; z-index: 50;
+      background: #f8f9fa;
+      margin: -1rem -1rem 1rem;
+      padding: 1rem 1rem 0.75rem;
+      border-bottom: 1px solid #dee2e6;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.07);
+    }
+
+    /* ── Toolbar ── */
+    .toolbar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0; }
+    .toolbar button { padding: 0.4rem 0.75rem; border-radius: 6px; border: 1px solid #ced4da; background: #fff; cursor: pointer; font-size: 0.9rem; }
+    .toolbar button:hover { background: #e9ecef; }
+    .toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .toolbar button.primary { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+    .toolbar button.primary:hover:not(:disabled) { background: #0b5ed7; }
+    .toolbar .msg { font-size: 0.85rem; color: #0f5132; }
+    .toolbar .err { color: #842029; }
+    .meta { color: #666; font-size: 0.9rem; margin-bottom: 1rem; }
+
+    /* ── Progress panel ── */
+    #progress-panel { margin-bottom: 0.75rem; border-radius: 8px; overflow: hidden; display: none; }
+    #progress-panel.visible { display: block; }
+
+    .prog-header {
+      display: flex; align-items: center; gap: 0.75rem;
+      padding: 0.9rem 1.1rem; background: #084298; color: #fff;
+      cursor: pointer; user-select: none;
+    }
+    .prog-header .prog-title { font-weight: 700; font-size: 1.05rem; flex: 1; }
+    .prog-header .prog-count { font-size: 0.95rem; opacity: 0.9; }
+    .prog-header .prog-chevron { font-size: 1rem; transition: transform 0.2s; display: inline-block; }
+    #progress-panel.collapsed .prog-chevron { transform: rotate(-90deg); }
+    #progress-panel.done-panel .prog-header { background: #0f5132; }
+    #progress-panel.error-panel .prog-header { background: #842029; }
+
+    .prog-bar-wrap { background: #cfe2ff; height: 12px; }
+    .prog-bar { height: 100%; background: #0d6efd; width: 0%; transition: width 0.4s; }
+    #progress-panel.done-panel .prog-bar { background: #2b8a3e; }
+
+    .prog-body { background: #fff; border: 1px solid #b6d4fe; border-top: none;
+                 max-height: 520px; overflow-y: auto; }
+    #progress-panel.collapsed .prog-body { display: none; }
+
+    /* Currently active row */
+    .prog-active {
+      display: flex; align-items: center; gap: 0.6rem;
+      padding: 0.75rem 1.1rem; background: #e7f1ff; border-bottom: 1px solid #b6d4fe;
+      font-size: 1rem; font-weight: 600;
+    }
+    .prog-active.hidden { display: none; }
+    .spinner { display: inline-block; width: 14px; height: 14px;
+               border: 2px solid #b6d4fe; border-top-color: #0d6efd;
+               border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Company rows table */
+    .prog-table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
+    .prog-table td { padding: 0.45rem 1rem; border-bottom: 1px solid #f1f3f5; vertical-align: middle; }
+    .prog-table tr:last-child td { border-bottom: none; }
+    .prog-table .col-icon { width: 20px; text-align: center; }
+    .prog-table .col-name { font-weight: 500; color: #212529; }
+    .prog-table .col-result { color: #6c757d; }
+    .prog-table .col-result.ok { color: #2b8a3e; }
+    .prog-table .col-result.err { color: #c92a2a; }
+    .prog-table .col-result.empty { color: #e67700; }
+    .prog-table .col-result.skip { color: #868e96; }
+    .prog-table tr.row-active td { background: #f0f6ff; }
+    .prog-table tr.row-waiting td { opacity: 0.45; }
+
+    /* ── Company cards ── */
+    .company { margin-bottom: 0.5rem; border: 1px solid #dee2e6; border-radius: 6px; background: #fff; overflow: hidden; }
+    .company.scraping-now { border-color: #0d6efd; box-shadow: 0 0 0 2px #cfe2ff; }
+    .company-header { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.85rem; cursor: pointer; user-select: none; flex-wrap: wrap; }
+    .company-header:hover { background: #f1f3f5; }
+    .company-header .toggle { font-size: 0.8rem; color: #868e96; transition: transform 0.15s; }
+    .company.open .toggle { transform: rotate(90deg); }
+    .company-name { font-weight: 600; color: #212529; flex: 1; min-width: 0; }
+    .company-link { font-size: 0.75rem; color: #868e96; text-decoration: none; margin-left: 0.35rem; }
+    .company-link:hover { color: #1971c2; }
+    .company-badges { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    .badge { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 4px; }
+    .badge.saved { background: #d3f9d8; color: #2b8a3e; }
+    .badge.empty { background: #fff3bf; color: #e67700; }
+    .badge.error { background: #ffe3e3; color: #c92a2a; }
+    .badge.unknown { background: #e9ecef; color: #6c757d; }
+    .company-time { font-size: 0.8rem; color: #868e96; }
+    .btn-rescrape { padding: 0.2rem 0.5rem; font-size: 0.75rem; border-radius: 4px; border: 1px solid #adb5bd; background: #fff; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+    .btn-rescrape:hover { background: #e9ecef; }
+    .btn-rescrape:disabled { opacity: 0.45; cursor: not-allowed; }
+    .company-progress {
+      display: none; align-items: center; gap: 0.55rem;
+      padding: 0.45rem 0.85rem; border-top: 1px solid #b6d4fe;
+      background: #e7f1ff; font-size: 0.87rem; color: #084298; font-weight: 500;
+    }
+    .company-progress.visible { display: flex; }
+    .company-progress.done  { background: #d3f9d8; border-color: #8ce99a; color: #2b8a3e; }
+    .company-progress.empty { background: #fff3bf; border-color: #ffe066; color: #e67700; }
+    .company-progress.error { background: #ffe3e3; border-color: #ffa8a8; color: #c92a2a; }
+    .company-body { padding: 0 0.85rem 0.85rem; border-top: 1px solid #eee; display: none; }
+    .company.open .company-body { display: block; }
+    .company-error { font-size: 0.85rem; color: #c92a2a; background: #fff5f5; padding: 0.5rem 0.6rem; border-radius: 4px; margin-top: 0.5rem; white-space: pre-wrap; word-break: break-word; }
+    .job-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+    .job-list li { display: flex; align-items: center; gap: 0.4rem; margin: 0.3rem 0; }
+    .job-list a { color: #1971c2; text-decoration: none; font-size: 0.95rem; }
+    .job-list a:hover { text-decoration: underline; }
+    .job-list li.applied a { color: #868e96; }
+    .btn-applied {
+      flex-shrink: 0; width: 18px; height: 18px; border-radius: 3px;
+      border: 1.5px solid #ced4da; background: #fff; cursor: pointer;
+      font-size: 0.65rem; line-height: 1; color: transparent; padding: 0;
+    }
+    .btn-applied:hover { border-color: #2b8a3e; color: #2b8a3e; }
+    .job-list li.applied .btn-applied { background: #2b8a3e; border-color: #2b8a3e; color: #fff; }
+    .applied-label { font-size: 0.72rem; color: #2b8a3e; white-space: nowrap; }
+    #root.loading { opacity: 0.6; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="sticky-header">
+    <h1>Scraped Jobs</h1>
+
+    <!-- ── Progress panel ── -->
+    <div id="progress-panel">
+      <div class="prog-header" id="prog-header">
+        <span class="prog-chevron">▼</span>
+        <span class="prog-title" id="prog-title">Scraping…</span>
+        <span class="prog-count" id="prog-count"></span>
+      </div>
+      <div class="prog-bar-wrap"><div class="prog-bar" id="prog-bar"></div></div>
+      <div class="prog-body" id="prog-body">
+        <div class="prog-active hidden" id="prog-active">
+          <span class="spinner"></span>
+          <span id="prog-active-name">—</span>
+        </div>
+        <table class="prog-table"><tbody id="prog-rows"></tbody></table>
+      </div>
+    </div>
+
+    <!-- ── Toolbar ── -->
+    <div class="toolbar">
+      <button type="button" id="btn-refresh" class="primary">Refresh</button>
+      <button type="button" id="btn-collapse-all">Collapse all</button>
+      <button type="button" id="btn-rescrape-all">Rescrape all</button>
+      <button type="button" id="btn-rescrape-errors">Rescrape errors</button>
+      <button type="button" id="btn-rescrape-empty">Rescrape empty</button>
+      <span id="toolbar-msg" class="msg"></span>
+    </div>
+  </div>
+
+  <p class="meta">Data from the Jobs folder — refresh to update. Use buttons above to trigger re-scraping.</p>
+  <div id="root"></div>
+
+  <script>
+    const root        = document.getElementById('root');
+    const msgEl       = document.getElementById('toolbar-msg');
+    const panel       = document.getElementById('progress-panel');
+    const progTitle   = document.getElementById('prog-title');
+    const progCount   = document.getElementById('prog-count');
+    const progBar     = document.getElementById('prog-bar');
+    const progActive  = document.getElementById('prog-active');
+    const progActiveName = document.getElementById('prog-active-name');
+    const progRows    = document.getElementById('prog-rows');
+
+    let pollTimer = null;
+    let scraperRunning = false;
+    let scraperStartedAt = 0;  // ms timestamp when startPolling() was called
+    let scraperMode = 'bulk';  // 'bulk' | 'single'
+    let scraperCompany = '';   // set when scraperMode === 'single'
+
+    // ── Utilities ─────────────────────────────────────────────────────────────
+    function esc(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function escAttr(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+    function showMsg(text, isError) {
+      msgEl.textContent = text;
+      msgEl.className = 'msg' + (isError ? ' err' : '');
+      if (text) setTimeout(() => { if (msgEl.textContent === text) msgEl.textContent = ''; }, isError ? 12000 : 6000);
+    }
+
+    function setButtonsDisabled(disabled) {
+      ['btn-rescrape-all','btn-rescrape-errors','btn-rescrape-empty'].forEach(id => {
+        document.getElementById(id).disabled = disabled;
+      });
+      document.querySelectorAll('.btn-rescrape').forEach(b => b.disabled = disabled);
+    }
+
+    // ── Progress state ─────────────────────────────────────────────────────────
+    // Parsed from progress file lines into a structured object.
+    function parseProgressLines(lines) {
+      const state = {
+        total: 0, done: false, running: false,
+        current: null,        // company currently being scraped
+        companies: [],        // [ { name, status:'waiting'|'active'|'done'|'empty'|'error'|'skip', jobs:N, err:'' } ]
+        totalJobs: 0,
+        processed: 0,         // done + skip + empty + error
+      };
+      const byName = {};      // name -> entry in state.companies
+
+      function ensure(name) {
+        if (!byName[name]) {
+          const entry = { name, status: 'waiting', jobs: 0, err: '' };
+          byName[name] = entry;
+          state.companies.push(entry);
+        }
+        return byName[name];
+      }
+
+      for (const line of lines) {
+        if (line.startsWith('total:')) {
+          state.total = parseInt(line.slice(6)) || 0;
+        } else if (line === 'start') {
+          state.running = true;
+        } else if (line === 'done') {
+          state.done = true; state.running = false; state.current = null;
+        } else if (line.startsWith('company:')) {
+          const name = line.slice(8).trim();
+          state.current = name;
+          ensure(name).status = 'active';
+        } else if (line.startsWith('company_done:')) {
+          const parts = line.slice(13).trim().split(/\s+/);
+          const name = parts[0] || '';
+          const jobs = parseInt(parts[1]) || 0;
+          const outcome = parts[2] || 'saved';
+          const e = ensure(name);
+          e.status = outcome === 'saved' ? 'done' : outcome === 'empty' ? 'empty' : 'error';
+          e.jobs = jobs;
+          state.totalJobs += jobs;
+          state.processed++;
+          if (state.current === name) state.current = null;
+        } else if (line.startsWith('company_error:')) {
+          const rest = line.slice(14).trim();
+          const idx = rest.indexOf(' ');
+          const name = idx > 0 ? rest.slice(0, idx) : rest;
+          const msg  = idx > 0 ? rest.slice(idx + 1) : '';
+          const e = ensure(name);
+          e.status = 'error'; e.err = msg;
+          state.processed++;
+          if (state.current === name) state.current = null;
+        } else if (line.startsWith('skip:')) {
+          const name = line.slice(5).trim();
+          ensure(name).status = 'skip';
+          state.processed++;
+        }
+      }
+      return state;
+    }
+
+    const STATUS_ICON = {
+      waiting: '○',
+      active:  '●',   // replaced with spinner in DOM
+      done:    '✓',
+      empty:   '⊘',
+      error:   '✗',
+      skip:    '⏭',
+    };
+    const STATUS_LABEL = {
+      waiting: '',
+      active:  'scraping…',
+      done:    (e) => e.jobs + (e.jobs === 1 ? ' job' : ' jobs'),
+      empty:   'no matches',
+      error:   (e) => 'error: ' + (e.err || '?'),
+      skip:    'skipped',
+    };
+    const STATUS_CLS = { done:'ok', empty:'empty', error:'err', skip:'skip', active:'', waiting:'' };
+
+    function renderProgressPanel(state, isRunning) {
+      panel.classList.add('visible');
+      panel.classList.toggle('done-panel', state.done && !state.running);
+      panel.classList.toggle('error-panel', false);
+
+      const total     = state.total || state.companies.length;
+      const processed = state.processed;
+      const pct       = total > 0 ? Math.round(processed / total * 100) : 0;
+
+      if (state.done) {
+        progTitle.textContent = `Scrape complete — ${state.totalJobs} job${state.totalJobs !== 1 ? 's' : ''} found`;
+        progCount.textContent = `${processed} / ${total} companies`;
+      } else if (isRunning) {
+        progTitle.textContent = 'Scraping…';
+        progCount.textContent = total > 0 ? `${processed} / ${total}` : `${processed} done`;
+      } else {
+        progTitle.textContent = 'Scrape finished';
+        progCount.textContent = `${processed} companies`;
+      }
+
+      progBar.style.width = total > 0 ? pct + '%' : '0%';
+
+      // Active row
+      if (state.current) {
+        progActive.classList.remove('hidden');
+        progActiveName.textContent = state.current;
+      } else {
+        progActive.classList.add('hidden');
+      }
+
+      // Per-company rows
+      if (state.companies.length === 0) {
+        progRows.innerHTML = `<tr><td colspan="3" style="padding:1rem;color:#6c757d;font-style:italic;">
+          No per-company detail recorded for this run.</td></tr>`;
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      state.companies.forEach(e => {
+        const tr = document.createElement('tr');
+        if (e.status === 'active') tr.className = 'row-active';
+        if (e.status === 'waiting') tr.className = 'row-waiting';
+
+        const label = typeof STATUS_LABEL[e.status] === 'function'
+          ? STATUS_LABEL[e.status](e)
+          : STATUS_LABEL[e.status];
+        const cls   = STATUS_CLS[e.status] || '';
+        const icon  = e.status === 'active'
+          ? '<span class="spinner" style="width:11px;height:11px;border-width:1.5px"></span>'
+          : esc(STATUS_ICON[e.status] || '');
+
+        tr.innerHTML = `
+          <td class="col-icon">${icon}</td>
+          <td class="col-name">${esc(e.name)}</td>
+          <td class="col-result ${cls}">${esc(label)}</td>
+        `;
+        frag.appendChild(tr);
+      });
+      progRows.innerHTML = '';
+      progRows.appendChild(frag);
+    }
+
+    // ── Progress polling ───────────────────────────────────────────────────────
+
+    // Show/update the inline progress strip inside a company card.
+    function updateCompanyProgress(company, visible, modifierClass, text) {
+      const card = document.querySelector(`.company[data-company="${CSS.escape(company)}"]`);
+      if (!card) return;
+      const prog = card.querySelector('.company-progress');
+      if (!prog) return;
+      prog.className = 'company-progress' + (visible ? ' visible' : '') + (modifierClass ? ' ' + modifierClass : '');
+      const textEl = prog.querySelector('.company-progress-text');
+      const spinnerEl = prog.querySelector('.spinner');
+      if (textEl) textEl.textContent = text || 'Scraping…';
+      if (spinnerEl) spinnerEl.style.display = modifierClass ? 'none' : '';
+    }
+
+    async function pollProgress() {
+      try {
+        const r = await fetch('/api/progress');
+        const data = await r.json();
+        if (!data.lines || !data.lines.length) return;
+
+        const state = parseProgressLines(data.lines);
+
+        if (scraperMode === 'bulk') {
+          // ── Bulk: drive the top progress panel ──────────────────────────────
+          renderProgressPanel(state, data.running);
+
+          document.querySelectorAll('.company').forEach(el => el.classList.remove('scraping-now'));
+          if (state.current) {
+            document.querySelectorAll('.company').forEach(el => {
+              if (el.dataset.company === state.current) el.classList.add('scraping-now');
+            });
+          }
+        } else {
+          // ── Single company: drive the inline progress strip ─────────────────
+          const card = document.querySelector(`.company[data-company="${CSS.escape(scraperCompany)}"]`);
+          if (card) card.classList.toggle('scraping-now', data.running);
+          updateCompanyProgress(scraperCompany, true, '', 'Scraping…');
+        }
+
+        if (!data.running) {
+          const elapsed = Date.now() - scraperStartedAt;
+          if (!state.done && elapsed < 10000) return;
+
+          stopPolling();
+          setButtonsDisabled(false);
+          scraperRunning = false;
+
+          if (state.done) {
+            if (scraperMode === 'single') {
+              // Show result in the inline strip, then reload
+              const entry = state.companies.find(e => e.name === scraperCompany);
+              let modCls = 'done', text = 'Done';
+              if (entry) {
+                if (entry.status === 'done') {
+                  text = `✓ ${entry.jobs} job${entry.jobs !== 1 ? 's' : ''} found`;
+                } else if (entry.status === 'empty') {
+                  modCls = 'empty'; text = 'No matching jobs';
+                } else if (entry.status === 'error') {
+                  modCls = 'error'; text = 'Error: ' + (entry.err || '?');
+                }
+              }
+              updateCompanyProgress(scraperCompany, true, modCls, text);
+              setTimeout(load, 1800);
+            } else {
+              setTimeout(load, 1200);
+            }
+          }
+        }
+      } catch (e) { /* server might be starting */ }
+    }
+
+    function startPolling() {
+      stopPolling();
+      scraperRunning = true;
+      scraperStartedAt = Date.now();
+      setButtonsDisabled(true);
+      if (scraperMode === 'bulk') panel.classList.remove('collapsed');
+      pollTimer = setInterval(pollProgress, 1500);
+      pollProgress();
+    }
+
+    function stopPolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    // Toggle progress panel collapse
+    document.getElementById('prog-header').addEventListener('click', () => {
+      panel.classList.toggle('collapsed');
+    });
+
+    // ── Persist expand/collapse state ─────────────────────────────────────────
+    // Stores { companyName: true|false } — true=open, false=closed.
+    // Companies absent from storage fall back to defaultOpen().
+    const STORAGE_KEY = 'jobs_open_state';
+    localStorage.removeItem('jobs_expanded'); // remove stale key from earlier version
+
+    function loadOpenState() {
+      try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+      catch { return {}; }
+    }
+
+    function setOpenState(company, open) {
+      const state = loadOpenState();
+      state[company] = open;
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+      catch {}
+    }
+
+    // Default when a company has never been manually toggled
+    function defaultOpen(c) {
+      return (c.status === 'saved' && c.jobs.length > 0) || c.status === 'error';
+    }
+
+    // ── Company list rendering ─────────────────────────────────────────────────
+    function render(data) {
+      root.innerHTML = '';
+      root.classList.remove('loading');
+      if (!Array.isArray(data) || data.length === 0) {
+        root.innerHTML = '<p class="meta">No companies in Jobs folder yet. Run the crawler or use Rescrape all.</p>';
+        return;
+      }
+
+      const openState = loadOpenState();
+
+      data.forEach((c) => {
+        // Use persisted value if the user has ever toggled this company;
+        // otherwise fall back to the default rule.
+        const open = c.company in openState ? openState[c.company] : defaultOpen(c);
+        const div  = document.createElement('div');
+        div.className = 'company' + (open ? ' open' : '');
+        div.dataset.company = c.company;
+        div.innerHTML = `
+          <div class="company-header">
+            <span class="toggle">▶</span>
+            <span class="company-name">${esc(c.company)}${c.seed_url ? `<a class="company-link" href="${escAttr(c.seed_url)}" target="_blank" rel="noopener" title="Open careers page">↗</a>` : ''}</span>
+            <span class="company-badges">
+              <span class="badge ${c.status}">${c.status}</span>
+              <span class="company-time">${esc(c.last_update_display)}</span>
+              ${c.jobs.length ? `<span class="company-time">${c.jobs.length} job${c.jobs.length !== 1 ? 's' : ''}</span>` : ''}
+            </span>
+            <button type="button" class="btn-rescrape" data-company="${escAttr(c.company)}">Rescrape</button>
+          </div>
+          <div class="company-progress">
+            <span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span>
+            <span class="company-progress-text">Scraping…</span>
+          </div>
+          <div class="company-body">
+            ${c.error ? `<div class="company-error">${esc(c.error)}</div>` : ''}
+            <ul class="job-list">
+              ${(c.jobs || []).map(j => `
+                <li class="${j.applied ? 'applied' : ''}" data-hash="${escAttr(j.job_hash || '')}">
+                  <button type="button" class="btn-applied" title="${j.applied ? 'Mark as not applied' : 'Mark as applied'}">✓</button>
+                  <a href="${escAttr(j.apply_url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
+                  ${j.applied ? '<span class="applied-label">applied</span>' : ''}
+                </li>
+              `).join('')}
+            </ul>
+          </div>
+        `;
+        root.appendChild(div);
+
+        div.querySelector('.company-header').addEventListener('click', (e) => {
+          if (e.target.closest('.btn-rescrape') || e.target.closest('.company-link')) return;
+          div.classList.toggle('open');
+          setOpenState(c.company, div.classList.contains('open'));
+        });
+        div.querySelector('.btn-rescrape').addEventListener('click', (e) => {
+          e.stopPropagation();
+          rescrapeCompany(c.company);
+        });
+      });
+
+      if (scraperRunning) setButtonsDisabled(true);
+    }
+
+    async function load() {
+      root.classList.add('loading');
+      try {
+        const r = await fetch('/api/jobs');
+        if (!r.ok) throw new Error(r.statusText);
+        render(await r.json());
+      } catch (e) {
+        root.classList.remove('loading');
+        showMsg('Failed to load: ' + e.message, true);
+        root.innerHTML = '<p class="meta">Could not load data. Is the server running?</p>';
+      }
+    }
+
+    // ── Rescrape actions ───────────────────────────────────────────────────────
+    async function rescrape(filter) {
+      showMsg('Starting rescrape…');
+      try {
+        const r = await fetch('/api/rescrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filter }),
+        });
+        const data = await r.json();
+        if (data.ok) {
+          scraperMode = 'bulk';
+          scraperCompany = '';
+          showMsg(data.message);
+          startPolling();
+        } else showMsg(data.message || 'Failed', true);
+      } catch (e) { showMsg('Request failed: ' + e.message, true); }
+    }
+
+    async function rescrapeCompany(company) {
+      try {
+        const r = await fetch('/api/rescrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ company }),
+        });
+        const data = await r.json();
+        if (data.ok) {
+          scraperMode = 'single';
+          scraperCompany = company;
+          // Show spinner immediately in the card (before first poll)
+          updateCompanyProgress(company, true, '', 'Scraping…');
+          startPolling();
+        } else showMsg(data.message || 'Failed', true);
+      } catch (e) { showMsg('Request failed: ' + e.message, true); }
+    }
+
+    // ── Applied toggle ─────────────────────────────────────────────────────────
+    root.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.btn-applied');
+      if (!btn) return;
+      const li = btn.closest('li[data-hash]');
+      if (!li) return;
+      const jobHash = li.dataset.hash;
+      if (!jobHash) return;
+
+      const nowApplied = !li.classList.contains('applied');
+      // Optimistic UI update
+      li.classList.toggle('applied', nowApplied);
+      btn.title = nowApplied ? 'Mark as not applied' : 'Mark as applied';
+      // Update or remove the "applied" label
+      let label = li.querySelector('.applied-label');
+      if (nowApplied) {
+        if (!label) {
+          label = document.createElement('span');
+          label.className = 'applied-label';
+          label.textContent = 'applied';
+          li.appendChild(label);
+        }
+      } else {
+        if (label) label.remove();
+      }
+
+      // Persist to server
+      const company = li.closest('.company')?.dataset.company || '';
+      const title   = li.querySelector('a')?.textContent || '';
+      const url     = li.querySelector('a')?.href || '';
+      try {
+        await fetch('/api/applied', {
+          method: nowApplied ? 'POST' : 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_hash: jobHash, company, title, url }),
+        });
+      } catch (err) {
+        // Revert on network failure
+        li.classList.toggle('applied', !nowApplied);
+        btn.title = !nowApplied ? 'Mark as not applied' : 'Mark as applied';
+        if (nowApplied && label) label.remove();
+        else if (!nowApplied && !label) {
+          const l = document.createElement('span');
+          l.className = 'applied-label'; l.textContent = 'applied';
+          li.appendChild(l);
+        }
+      }
+    });
+
+    // ── Boot ───────────────────────────────────────────────────────────────────
+    document.getElementById('btn-refresh').addEventListener('click', load);
+    document.getElementById('btn-collapse-all').addEventListener('click', () => {
+      const state = loadOpenState();
+      document.querySelectorAll('.company').forEach(el => {
+        el.classList.remove('open');
+        state[el.dataset.company] = false;
+      });
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+    });
+    document.getElementById('btn-rescrape-all').addEventListener('click',    () => rescrape('all'));
+    document.getElementById('btn-rescrape-errors').addEventListener('click', () => rescrape('errors'));
+    document.getElementById('btn-rescrape-empty').addEventListener('click',  () => rescrape('empty'));
+
+    // On page load: check if a scrape is already running and resume polling
+    load().then(() => {
+      fetch('/api/progress').then(r => r.json()).then(d => {
+        if (d.running) startPolling();
+        else if (d.lines && d.lines.length) {
+          // Show last completed run result (collapsed)
+          const state = parseProgressLines(d.lines);
+          renderProgressPanel(state, false);
+          panel.classList.add('collapsed');
+        }
+      }).catch(() => {});
+    });
+  </script>
+</body>
+</html>
