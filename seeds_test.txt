@@ -26,7 +26,7 @@ Amazon, https://www.amazon.jobs/en/search?base_query=software%20engineer
 Netflix, https://jobs.netflix.com/search?q=software
 Microsoft, https://apply.careers.microsoft.com/careers/search
 Uber, https://www.uber.com/us/en/careers/list/?query=software
-Lyft, https://www.lyft.com/careers?query=software
+Lyft, https://boards.greenhouse.io/lyft
 Airbnb, https://careers.airbnb.com/positions/?_search_input=software
 DoorDash, https://careersatdoordash.com/job-search/?keyword=software&location=remote&spage=1
 # Unicorns

@@ -50,7 +50,7 @@ def detect_strategy(url: str) -> str:
     """
     Return the strategy name for a given URL, or 'playwright' as fallback.
     Strategies: 'workday', 'greenhouse', 'lever', 'ashby', 'microsoft',
-                'smartrecruiters', 'salesforce', 'playwright'
+                'smartrecruiters', 'salesforce', 'meta', 'playwright'
     """
     parsed = urlparse(url)
     host = parsed.netloc.lower()
@@ -80,6 +80,9 @@ def detect_strategy(url: str) -> str:
 
     if 'careers.salesforce.com' in host:
         return 'salesforce'
+
+    if 'metacareers.com' in host:
+        return 'meta'
 
     return 'playwright'
 
@@ -669,78 +672,204 @@ _SF_FEED = 'https://careers.salesforce.com/en/jobs/xml/'
 
 def scrape_salesforce(url: str, location_re, is_job_match,
                       log: logging.Logger) -> list[dict] | None:
+    # The feed always returns the full dataset in a single response — pagination
+    # params and location params are silently ignored by the endpoint.
     log.info('  [Salesforce] %s', _SF_FEED)
 
     def _text(el, tag: str) -> str:
         child = el.find(tag)
         return (child.text or '').strip() if child is not None else ''
 
+    try:
+        r = _SESSION.get(_SF_FEED, params={'search': 'software engineer'}, timeout=30)
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+    except Exception as e:
+        log.warning('  [SF] feed failed: %s', e)
+        return None
+
+    all_jobs = root.findall('job')
+    log.debug('  [SF] total jobs in feed: %d', len(all_jobs))
+
     results: list[dict] = []
     seen_ids: set = set()
 
-    for loc_query in ('New York', 'Remote'):
-        page = 1
-        log.debug('  [SF] querying location=%r', loc_query)
-        while True:
-            try:
-                r = _SESSION.get(_SF_FEED, params={
-                    'search': 'software engineer',
-                    'location': loc_query,
-                    'page': page,
-                }, timeout=20)
-                r.raise_for_status()
-                root = ET.fromstring(r.content)
-            except Exception as e:
-                log.warning('  [SF] feed failed loc=%r page=%d: %s', loc_query, page, e)
-                break
+    for job in all_jobs:
+        job_id = _text(job, 'apijobid') or _text(job, 'requisitionid')
+        if not job_id or job_id in seen_ids:
+            continue
 
-            jobs = root.findall('job')
-            if not jobs:
-                break
+        title = _text(job, 'title')
+        if not is_job_match(title):
+            continue
 
-            for job in jobs:
-                job_id = _text(job, 'apijobid') or _text(job, 'requisitionid')
-                if not job_id or job_id in seen_ids:
-                    continue
+        city       = _text(job, 'city')
+        state      = _text(job, 'state')
+        remotetype = _text(job, 'remotetype').lower()
+        is_remote  = remotetype == 'remote'
 
-                title = _text(job, 'title')
-                if not is_job_match(title):
-                    continue
+        if is_remote:
+            loc_str = 'Remote'
+        elif city and state:
+            loc_str = f'{city}, {state}'
+        else:
+            loc_str = city or _text(job, 'country')
 
-                city       = _text(job, 'city')
-                state      = _text(job, 'state')
-                remotetype = _text(job, 'remotetype').lower()
-                is_remote  = remotetype == 'remote'
+        if not is_remote and location_re:
+            if loc_str and not _loc_passes_strict(loc_str, location_re):
+                log.debug('  [SF] ✗ loc: %s — %s', title[:50], loc_str)
+                continue
 
-                if is_remote:
-                    loc_str = 'Remote'
-                elif city and state:
-                    loc_str = f'{city}, {state}'
-                else:
-                    loc_str = city or _text(job, 'country')
+        seen_ids.add(job_id)
+        job_url = _text(job, 'url') or f'https://careers.salesforce.com/en/jobs/{job_id}/'
+        results.append({
+            'title': title,
+            'url': job_url,
+            'apply_url': job_url,
+            'location': loc_str,
+            'description': _strip_html(_text(job, 'description')),
+        })
 
-                if not is_remote and location_re:
-                    if loc_str and not _loc_passes_strict(loc_str, location_re):
-                        log.debug('  [SF] ✗ loc: %s — %s', title[:50], loc_str)
-                        continue
+    log.debug('  [SF] matching jobs: %d', len(results))
+    return results
 
-                seen_ids.add(job_id)
-                job_url = _text(job, 'url') or f'https://careers.salesforce.com/en/jobs/{job_id}/'
-                results.append({
-                    'title': title,
-                    'url': job_url,
-                    'apply_url': job_url,
-                    'location': loc_str,
-                    'description': _strip_html(_text(job, 'description')),
-                })
 
-            log.debug('  [SF] loc=%r page=%d got=%d matching=%d',
-                      loc_query, page, len(jobs), len(results))
-            page += 1
-            if len(jobs) < 10:
-                break
-            time.sleep(0.2)
+# ── Meta ──────────────────────────────────────────────────────────────────────
+# GraphQL API: POST https://www.metacareers.com/graphql
+#   doc_id: CareersJobSearchResultsDataQuery_candidate_portalRelayOperation
+#   variables: { search_input: { q, page, offices, roles, leadership_levels, ... } }
+#   The endpoint returns all matching jobs in one shot (pagination params ignored).
+#
+# CSRF: the page embeds an LSD token that must be echoed in the POST body and
+#   X-FB-LSD header.  We fetch the careers page once to extract it.
 
+_META_GRAPHQL = 'https://www.metacareers.com/graphql'
+_META_SEARCH_DOC_ID = '29615178951461218'   # CareersJobSearchResultsDataQuery
+
+
+def scrape_meta(url: str, location_re, is_job_match,
+                log: logging.Logger) -> list[dict] | None:
+    import requests as _requests
+    log.info('  [Meta] %s', _META_GRAPHQL)
+
+    # Use a fresh session with browser-like headers.
+    # /jobs/?q=... requires a logged-in session; /jobsearch is publicly accessible.
+    meta_session = _requests.Session()
+    meta_session.headers.update({
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        ),
+        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Upgrade-Insecure-Requests': '1',
+    })
+    try:
+        page_r = meta_session.get('https://www.metacareers.com/jobsearch', timeout=20)
+        page_r.raise_for_status()
+    except Exception as e:
+        log.warning('  [Meta] failed to load jobsearch page: %s', e)
+        return None
+
+    lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"]+)"', page_r.text)
+    if not lsd_match:
+        log.warning('  [Meta] LSD token not found in page')
+        return None
+    lsd_token = lsd_match.group(1)
+
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Origin': 'https://www.metacareers.com',
+        'Referer': 'https://www.metacareers.com/jobsearch',
+        'X-FB-LSD': lsd_token,
+    }
+
+    variables = {
+        'search_input': {
+            'q': 'software engineer',
+            'page': 1,
+            'offices': [],
+            'roles': ['Full time employment'],
+            'leadership_levels': [],
+            'teams': ['Software Engineering', 'Infrastructure'],
+            'sub_teams': [],
+            'is_leadership': False,
+        }
+    }
+
+    try:
+        import json as _json
+        r = meta_session.post(_META_GRAPHQL, headers=headers, data={
+            'variables': _json.dumps(variables),
+            'doc_id': _META_SEARCH_DOC_ID,
+            'lsd': lsd_token,
+        }, timeout=30)
+        r.raise_for_status()
+        body = r.text
+        if body.startswith('for (;;);'):
+            body = body[9:]
+        data = _json.loads(body)
+    except Exception as e:
+        log.warning('  [Meta] API call failed: %s', e)
+        return None
+
+    errors = data.get('errors', [])
+    if errors and not data.get('data'):
+        log.warning('  [Meta] API errors: %s', errors[0].get('message', ''))
+        return None
+
+    jswf = (data.get('data') or {}).get('job_search_with_featured_jobs') or {}
+    all_jobs = jswf.get('all_jobs', []) + jswf.get('featured_jobs', [])
+    log.debug('  [Meta] total jobs from API: %d', len(all_jobs))
+
+    # Meta doesn't include seniority ("Senior", "Staff") in job titles —
+    # they use "Software Engineer, [Specialty]" for all levels.
+    # Filter by role keywords only; skip the seniority half of is_job_match.
+    _meta_role_re = re.compile(
+        r'\b(Software\s*Engineer|Software\s*Developer|SWE|'
+        r'Backend\s*Engineer|Frontend\s*Engineer|Full[\s\-]?Stack|'
+        r'Platform\s*Engineer|Infrastructure\s*Engineer|'
+        r'Site\s*Reliability\s*Engineer|SRE|'
+        r'Machine\s*Learning\s*Engineer|ML\s*Engineer|'
+        r'Systems?\s*Engineer|Security\s*Engineer|Data\s*Engineer|'
+        r'Application\s*Engineer|Cloud\s*Engineer|DevOps\s*Engineer)\b',
+        re.IGNORECASE,
+    )
+
+    results: list[dict] = []
+    seen_ids: set = set()
+
+    for job in all_jobs:
+        job_id = job.get('id', '')
+        if not job_id or job_id in seen_ids:
+            continue
+
+        title = (job.get('title') or '').strip()
+        if not _meta_role_re.search(title):
+            continue
+
+        locations = job.get('locations') or []
+        loc_str = ', '.join(locations) if locations else ''
+
+        if location_re and loc_str:
+            if not _loc_passes_strict(loc_str, location_re):
+                log.debug('  [Meta] ✗ loc: %s — %s', title[:50], loc_str)
+                continue
+
+        seen_ids.add(job_id)
+        job_url = f'https://www.metacareers.com/v2/jobs/{job_id}/'
+        results.append({
+            'title': title,
+            'url': job_url,
+            'apply_url': job_url,
+            'location': loc_str,
+            'description': '',
+        })
+
+    log.debug('  [Meta] matching jobs: %d', len(results))
     return results
 
 
@@ -776,6 +905,9 @@ def api_scrape(company: str, url: str,
 
     if strategy == 'salesforce':
         return scrape_salesforce(url, location_re, is_job_match, log)
+
+    if strategy == 'meta':
+        return scrape_meta(url, location_re, is_job_match, log)
 
     return None   # playwright fallback
 

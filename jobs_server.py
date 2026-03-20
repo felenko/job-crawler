@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -47,6 +48,11 @@ JOBS_DIR = BASE / "Jobs"
 SEEDS_FILE = BASE / "seeds_test.txt"
 CRAWLER_SCRIPT = BASE / "job_crawler.py"
 PROGRESS_FILE = JOBS_DIR / ".scrape_progress"  # bulk operations
+
+# Unique ID for this server process lifetime.  Written into every progress file
+# so that on restart we can recognise files from the previous session as stale —
+# regardless of whether the OS reused the crawler's PID.
+SERVER_SESSION = str(uuid.uuid4())
 
 
 def _company_progress_file(company: str) -> Path:
@@ -179,10 +185,10 @@ def _start_rescrape_entries(entries: list[tuple[str, str]], label: str,
         return False, str(e)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     pf = progress_file if progress_file is not None else PROGRESS_FILE
-    # Clear the progress file NOW so the UI doesn't see a stale 'done' line
-    # from the previous run on the very first poll after this subprocess launches.
+    # Write session stamp so on the next server restart we can identify this
+    # file as stale (regardless of PID reuse) and clean it up automatically.
     try:
-        pf.write_text("", encoding="utf-8")
+        pf.write_text(f"session:{SERVER_SESSION}\n", encoding="utf-8")
     except Exception:
         pass
     progress_path = str(pf)
@@ -298,6 +304,95 @@ def api_progress():
     return jsonify(out)
 
 
+def _progress_file_is_active(pf: Path) -> bool:
+    """Return True only if this progress file belongs to the current server session
+    AND the crawler process is still running.
+
+    Session-stamp check eliminates false positives from OS PID reuse: any file
+    written by a previous server instance will have a different session token and
+    is unconditionally treated as stale.
+    """
+    try:
+        raw = pf.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    if any(ln == "done" for ln in lines):
+        return False
+    # Session check — must match this server instance
+    session_line = next((ln for ln in lines if ln.startswith("session:")), None)
+    if session_line and session_line.split(":", 1)[1] != SERVER_SESSION:
+        return False  # stale: belongs to a previous server run
+    # PID check as secondary guard (handles cases where session line is absent)
+    pid = None
+    for ln in lines:
+        if ln.startswith("pid:"):
+            try:
+                pid = int(ln.split(":", 1)[1])
+            except (IndexError, ValueError):
+                pass
+            break
+    if pid is not None and not _is_process_running(pid):
+        return False
+    # If we have a valid session match, trust it even without a pid yet
+    return session_line is not None
+
+
+def cleanup_stale_progress_files() -> None:
+    """On server startup, delete any progress files that don't belong to this session.
+
+    Because SERVER_SESSION is a fresh UUID on every startup, ALL files from
+    previous runs are stale — regardless of whether the OS reused their PIDs.
+    """
+    if not JOBS_DIR.is_dir():
+        return
+    targets = list(JOBS_DIR.glob(".scrape_progress*"))
+    if PROGRESS_FILE.is_file():
+        targets.append(PROGRESS_FILE)
+    for f in targets:
+        if not f.is_file():
+            continue
+        if not _progress_file_is_active(f):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
+
+@app.route("/api/progress/active")
+def api_progress_active():
+    """Return list of company names that currently have a per-company scrape in progress."""
+    active = []
+    if not JOBS_DIR.is_dir():
+        return jsonify({"active": active})
+    prefix = ".scrape_progress_"
+    for f in JOBS_DIR.iterdir():
+        if not f.name.startswith(prefix) or not f.is_file():
+            continue
+        company = f.name[len(prefix):]
+        if not company:
+            continue
+        if _progress_file_is_active(f):
+            active.append(company)
+    return jsonify({"active": active})
+
+
+@app.route("/api/progress", methods=["DELETE"])
+def api_progress_clear():
+    """Force-clear a stuck progress file. Body: { "job": "CompanyName" } or empty for bulk."""
+    body = request.get_json(silent=True) or {}
+    job = (body.get("job") or "").strip()
+    pf = _company_progress_file(job) if job else PROGRESS_FILE
+    try:
+        if pf.is_file():
+            pf.unlink()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
+
 @app.route("/api/rescrape", methods=["POST"])
 def api_rescrape():
     """Start rescrape. Body: { \"filter\": \"all\"|\"errors\"|\"empty\" } or { \"company\": \"CompanyName\" }."""
@@ -339,6 +434,7 @@ def _setup_logging() -> logging.Logger:
 
 def main():
     init_db()
+    cleanup_stale_progress_files()
     ap = argparse.ArgumentParser(description="Run dynamic jobs browser server")
     ap.add_argument("--port", "-p", type=int, default=5000, help="Port to bind")
     ap.add_argument("--debug", action="store_true", help="Flask debug mode")
