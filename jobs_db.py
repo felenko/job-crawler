@@ -31,6 +31,15 @@ def init_db() -> None:
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS rejected_jobs (
+                job_hash    TEXT PRIMARY KEY,
+                company     TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                url         TEXT NOT NULL DEFAULT '',
+                rejected_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        ''')
 
 
 def compute_hash(company: str, title: str) -> str:
@@ -56,3 +65,22 @@ def mark_applied(job_hash: str, company: str, title: str, url: str = '') -> None
 def unmark_applied(job_hash: str) -> None:
     with _conn() as conn:
         conn.execute('DELETE FROM applied_jobs WHERE job_hash = ?', (job_hash,))
+
+
+def get_rejected_hashes() -> set[str]:
+    with _conn() as conn:
+        rows = conn.execute('SELECT job_hash FROM rejected_jobs').fetchall()
+    return {r['job_hash'] for r in rows}
+
+
+def mark_rejected(job_hash: str, company: str, title: str, url: str = '') -> None:
+    with _conn() as conn:
+        conn.execute(
+            'INSERT OR REPLACE INTO rejected_jobs (job_hash, company, title, url) VALUES (?,?,?,?)',
+            (job_hash, company, title, url),
+        )
+
+
+def unmark_rejected(job_hash: str) -> None:
+    with _conn() as conn:
+        conn.execute('DELETE FROM rejected_jobs WHERE job_hash = ?', (job_hash,))

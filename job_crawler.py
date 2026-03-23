@@ -43,12 +43,31 @@ SENIORITY_RE = re.compile(r'\b(Senior|Sr\.?|Staff|Principal)\b', re.IGNORECASE)
 
 ROLE_RE = re.compile(
     r'\b(Software\s*Engineer|Software\s*Developer|SWE|'
+    r'Software\s*Development\s*Engineer|SDE|'   # Amazon titles
     r'Backend\s*Engineer|Frontend\s*Engineer|Full[\s\-]?Stack\s*Engineer|'
     r'Platform\s*Engineer|Infrastructure\s*Engineer|'
     r'Site\s*Reliability\s*Engineer|SRE|'
     r'Machine\s*Learning\s*Engineer|ML\s*Engineer|'
     r'Systems?\s*Engineer|Security\s*Engineer|Data\s*Engineer|'
-    r'Application\s*Engineer|Cloud\s*Engineer|DevOps\s*Engineer)\b',
+    r'Application\s*Engineer|Cloud\s*Engineer|DevOps\s*Engineer|'
+    r'iOS\s*Engineer|macOS\s*Engineer|Android\s*Engineer|'
+    r'GPU\s*(?:\w+\s*)?Engineer|Compiler\s*Engineer|Kernel\s*Engineer|'
+    r'Firmware\s*Engineer|Embedded\s*(?:Systems?\s*)?Engineer|'
+    r'Graphics\s*Engineer|Distributed\s*Systems\s*Engineer)\b',
+    re.IGNORECASE,
+)
+
+# Some companies (e.g. Apple) don't include seniority in job titles — it's tracked
+# internally. For these domains, match any technical engineering/scientist role.
+_RELAXED_MATCH_DOMAINS = {'jobs.apple.com'}
+_RELAXED_ROLE_RE = re.compile(
+    r'\bEngineer\b|\bScientist\b|\bArchitect\b|\bDeveloper\b',
+    re.IGNORECASE,
+)
+_RELAXED_EXCLUDE_RE = re.compile(
+    r'\b(Specialist|Genius|Creative|Manager|Director|Recruiter|Coordinator|'
+    r'Analyst(?!\s*Engineer)|Legal|Finance|Marketing|Operations\s*Expert|'
+    r'Business\s*Pro|Sales)\b',
     re.IGNORECASE,
 )
 
@@ -330,13 +349,20 @@ def _get_clickables(page) -> list[dict]:
 def extract_job_links(page, seed_url: str) -> list[dict]:
     seen: set[str] = set()
     results = []
+    seed_domain = urlparse(seed_url).netloc.lower()
+    relaxed = seed_domain in _RELAXED_MATCH_DOMAINS
     for item in _get_links(page):
         text = item.get('text', '')
         href = item.get('href', '').strip()
         ctx  = item.get('ctx',  '')
         if not href or href in seen:
             continue
-        if is_job_match(text) and is_allowed_domain(href, seed_url):
+        if relaxed:
+            title_ok = (bool(_RELAXED_ROLE_RE.search(text))
+                        and not bool(_RELAXED_EXCLUDE_RE.search(text)))
+        else:
+            title_ok = is_job_match(text)
+        if title_ok and is_allowed_domain(href, seed_url):
             seen.add(href)
             # Extract location from the container text (everything except the title itself)
             listing_loc = ctx.replace(text, '').strip() if ctx else ''
@@ -654,6 +680,20 @@ def scrape_company(page, seed_url: str, output_dir: Path,
     except Exception:
         pass  # timeout on networkidle is common for SPAs; proceed with what's loaded
     page.wait_for_timeout(wait_ms)
+
+    # Site-specific extra wait: some React SPAs need longer for the job list to render.
+    _WAIT_SELECTORS: dict[str, str] = {
+        'jobs.apple.com': 'a[href*="/en-us/details/"]',
+    }
+    _seed_domain = urlparse(seed_url).netloc.lower()
+    for _domain, _selector in _WAIT_SELECTORS.items():
+        if _domain in _seed_domain:
+            try:
+                page.wait_for_selector(_selector, timeout=15_000)
+                log.debug("  [%s] job list selector appeared", _domain)
+            except Exception:
+                log.debug("  [%s] wait_for_selector timed out — proceeding", _domain)
+            break
 
     # Scan for matching jobs, with nav-hint navigation if needed
     job_links = extract_job_links(page, seed_url)

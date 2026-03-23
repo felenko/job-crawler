@@ -97,6 +97,7 @@
     .badge.saved { background: #d3f9d8; color: #2b8a3e; }
     .badge.empty { background: #fff3bf; color: #e67700; }
     .badge.error { background: #ffe3e3; color: #c92a2a; }
+    .badge.new   { background: #e7f5ff; color: #1864ab; }
     .badge.unknown { background: #e9ecef; color: #6c757d; }
     .company-time { font-size: 0.8rem; color: #868e96; }
     .btn-rescrape { padding: 0.2rem 0.5rem; font-size: 0.75rem; border-radius: 4px; border: 1px solid #adb5bd; background: #fff; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
@@ -121,6 +122,7 @@
     .job-list a { color: #1971c2; text-decoration: none; font-size: 0.95rem; }
     .job-list a:hover { text-decoration: underline; }
     .job-list li.applied a { color: #868e96; }
+    .job-list li.rejected a { color: #ced4da; text-decoration: line-through; }
     .btn-applied {
       flex-shrink: 0; width: 18px; height: 18px; border-radius: 3px;
       border: 1.5px solid #ced4da; background: #fff; cursor: pointer;
@@ -129,6 +131,14 @@
     .btn-applied:hover { border-color: #2b8a3e; color: #2b8a3e; }
     .job-list li.applied .btn-applied { background: #2b8a3e; border-color: #2b8a3e; color: #fff; }
     .applied-label { font-size: 0.72rem; color: #2b8a3e; white-space: nowrap; }
+    .btn-rejected {
+      flex-shrink: 0; width: 18px; height: 18px; border-radius: 3px;
+      border: 1.5px solid #ced4da; background: #fff; cursor: pointer;
+      font-size: 0.7rem; line-height: 1; color: transparent; padding: 0;
+    }
+    .btn-rejected:hover { border-color: #c92a2a; color: #c92a2a; }
+    .job-list li.rejected .btn-rejected { background: #c92a2a; border-color: #c92a2a; color: #fff; }
+    .rejected-label { font-size: 0.72rem; color: #c92a2a; white-space: nowrap; }
     #root.loading { opacity: 0.6; pointer-events: none; }
   </style>
 </head>
@@ -542,10 +552,12 @@
             ${c.error ? `<div class="company-error">${esc(c.error)}</div>` : ''}
             <ul class="job-list">
               ${(c.jobs || []).map(j => `
-                <li class="${j.applied ? 'applied' : ''}" data-hash="${escAttr(j.job_hash || '')}">
+                <li class="${j.applied ? 'applied' : j.rejected ? 'rejected' : ''}" data-hash="${escAttr(j.job_hash || '')}">
                   <button type="button" class="btn-applied" title="${j.applied ? 'Mark as not applied' : 'Mark as applied'}">✓</button>
+                  <button type="button" class="btn-rejected" title="${j.rejected ? 'Mark as not rejected' : 'Mark as rejected'}">✕</button>
                   <a href="${escAttr(j.apply_url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
                   ${j.applied ? '<span class="applied-label">applied</span>' : ''}
+                  ${j.rejected ? '<span class="rejected-label">rejected</span>' : ''}
                 </li>
               `).join('')}
             </ul>
@@ -581,9 +593,20 @@
     async function load() {
       root.classList.add('loading');
       try {
-        const r = await fetch('/api/jobs');
-        if (!r.ok) throw new Error(r.statusText);
-        render(await r.json());
+        const [jobsRes, seedsRes] = await Promise.all([fetch('/api/jobs'), fetch('/api/seeds')]);
+        if (!jobsRes.ok) throw new Error(jobsRes.statusText);
+        const jobs = await jobsRes.json();
+        const seeds = seedsRes.ok ? await seedsRes.json() : [];
+
+        // Append seeds entries that have no scraped data yet
+        const scraped = new Set(jobs.map(c => c.company));
+        for (const { name, url } of seeds) {
+          if (!scraped.has(name)) {
+            jobs.push({ company: name, status: 'new', last_update: null,
+                        last_update_display: 'never', error: '', jobs: [], seed_url: url });
+          }
+        }
+        render(jobs);
       } catch (e) {
         root.classList.remove('loading');
         showMsg('Failed to load: ' + e.message, true);
@@ -697,6 +720,56 @@
         else if (!nowApplied && !label) {
           const l = document.createElement('span');
           l.className = 'applied-label'; l.textContent = 'applied';
+          li.appendChild(l);
+        }
+      }
+    });
+
+    // ── Rejected toggle ────────────────────────────────────────────────────────
+    root.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.btn-rejected');
+      if (!btn) return;
+      const li = btn.closest('li[data-hash]');
+      if (!li) return;
+      const jobHash = li.dataset.hash;
+      if (!jobHash) return;
+
+      const nowRejected = !li.classList.contains('rejected');
+      // Optimistic UI update
+      li.classList.toggle('rejected', nowRejected);
+      // Rejecting clears applied state
+      if (nowRejected) li.classList.remove('applied');
+      btn.title = nowRejected ? 'Mark as not rejected' : 'Mark as rejected';
+      let label = li.querySelector('.rejected-label');
+      if (nowRejected) {
+        li.querySelector('.applied-label')?.remove();
+        if (!label) {
+          label = document.createElement('span');
+          label.className = 'rejected-label';
+          label.textContent = 'rejected';
+          li.appendChild(label);
+        }
+      } else {
+        if (label) label.remove();
+      }
+
+      const company = li.closest('.company')?.dataset.company || '';
+      const title   = li.querySelector('a')?.textContent || '';
+      const url     = li.querySelector('a')?.href || '';
+      try {
+        await fetch('/api/rejected', {
+          method: nowRejected ? 'POST' : 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_hash: jobHash, company, title, url }),
+        });
+      } catch (err) {
+        // Revert on failure
+        li.classList.toggle('rejected', !nowRejected);
+        btn.title = !nowRejected ? 'Mark as not rejected' : 'Mark as rejected';
+        if (nowRejected && label) label.remove();
+        else if (!nowRejected && !label) {
+          const l = document.createElement('span');
+          l.className = 'rejected-label'; l.textContent = 'rejected';
           li.appendChild(l);
         }
       }

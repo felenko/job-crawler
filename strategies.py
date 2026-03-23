@@ -30,6 +30,15 @@ from urllib.parse import urlparse, urljoin, quote
 
 import requests
 
+# Use the OS/Windows certificate store instead of certifi's bundle.
+# certifi lacks intermediate CAs (e.g. Amazon RSA 2048 M04) that servers
+# sometimes omit from their TLS chain; the system store handles AIA fetching.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass  # pip install truststore to fix SSL errors on Windows
+
 # ── Shared HTTP session ───────────────────────────────────────────────────────
 
 _SESSION = requests.Session()
@@ -42,6 +51,9 @@ _SESSION.headers.update({
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
 })
+# Bypass any local SSL inspection proxy (e.g. Fiddler/Charles at 127.0.0.1:8888).
+# Empty string (not None) explicitly disables proxy routing for the session.
+_SESSION.proxies = {"http": "", "https": ""}
 
 
 # ── Strategy detection ────────────────────────────────────────────────────────
@@ -50,7 +62,9 @@ def detect_strategy(url: str) -> str:
     """
     Return the strategy name for a given URL, or 'playwright' as fallback.
     Strategies: 'workday', 'greenhouse', 'lever', 'ashby', 'microsoft',
-                'smartrecruiters', 'salesforce', 'meta', 'playwright'
+                'smartrecruiters', 'salesforce', 'meta', 'doordash', 'google',
+                'block_xyz', 'amazon', 'janestreet', 'netflix',
+                'twosigma', 'hrt', 'playwright'
     """
     parsed = urlparse(url)
     host = parsed.netloc.lower()
@@ -83,6 +97,30 @@ def detect_strategy(url: str) -> str:
 
     if 'metacareers.com' in host:
         return 'meta'
+
+    if 'careersatdoordash.com' in host:
+        return 'doordash'
+
+    if 'careers.google.com' in host or ('google.com' in host and '/careers/' in path):
+        return 'google'
+
+    if host == 'block.xyz' and '/careers' in path:
+        return 'block_xyz'
+
+    if 'amazon.jobs' in host:
+        return 'amazon'
+
+    if 'janestreet.com' in host and '/jobs/' in path:
+        return 'janestreet'
+
+    if 'jobs.netflix.net' in host or 'explore.jobs.netflix.net' in host:
+        return 'netflix'
+
+    if 'careers.twosigma.com' in host:
+        return 'twosigma'
+
+    if 'hudsonrivertrading.com' in host and '/careers' in path:
+        return 'hrt'
 
     return 'playwright'
 
@@ -193,6 +231,32 @@ def scrape_workday(url: str, location_re, is_job_match,
                          log=log)
 
 
+# ── API matching helper ───────────────────────────────────────────────────────
+# Companies on Greenhouse/Lever/Ashby boards often omit seniority from titles
+# (e.g. Figma, JumpTrading, Jane Street). Accept any matching role type from
+# these company-specific boards; seniority filter is still applied when both
+# seniority AND role are present via is_job_match.
+_API_ROLE_RE = re.compile(
+    r'\bEngineer\b|\bDeveloper\b|\bArchitect\b|\bSWE\b|\bSDE\b',
+    re.IGNORECASE,
+)
+_API_EXCLUDE_RE = re.compile(
+    r'\b(Intern|Co-?op|Apprentice|Manager|Director|VP |Vice\s+President|'
+    r'Recruiter|Coordinator|Analyst(?!\s*Engineer)|Sales|Marketing|Legal|'
+    r'Finance|Accountant|Office\s*Manager)\b',
+    re.IGNORECASE,
+)
+
+def _api_job_match(title: str, is_job_match) -> bool:
+    """Accept a job title from a company-specific API board.
+    Prefers full is_job_match (seniority + role), but falls back to role-only
+    for companies that don't include seniority in titles."""
+    if is_job_match(title):
+        return True
+    # Fallback: role match without seniority, excluding clearly non-engineering roles
+    return bool(_API_ROLE_RE.search(title)) and not bool(_API_EXCLUDE_RE.search(title))
+
+
 # ── Greenhouse ────────────────────────────────────────────────────────────────
 # URL pattern:  https://boards.greenhouse.io/{slug}
 # API:          GET https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true
@@ -224,7 +288,7 @@ def scrape_greenhouse(url: str, location_re, is_job_match,
     results = []
     for job in data.get('jobs', []):
         title = (job.get('title') or '').strip()
-        if not is_job_match(title):
+        if not _api_job_match(title, is_job_match):
             continue
 
         loc = (job.get('location', {}).get('name') or '').strip()
@@ -277,7 +341,7 @@ def scrape_lever(url: str, location_re, is_job_match,
     results = []
     for job in jobs:
         title = (job.get('text') or '').strip()
-        if not is_job_match(title):
+        if not _api_job_match(title, is_job_match):
             continue
 
         cats = job.get('categories', {})
@@ -303,8 +367,8 @@ def scrape_lever(url: str, location_re, is_job_match,
 
 # ── Ashby ─────────────────────────────────────────────────────────────────────
 # URL pattern:  https://jobs.ashbyhq.com/{slug}
-# API:          POST https://api.ashbyhq.com/posting-public/graphql
-# Body:         {"operationName":"ApiJobBoardWithTeams","variables":{"organizationHostedJobsPageName":"{slug}"},...}
+# API:          GET https://api.ashbyhq.com/posting-api/job-board/{slug}
+# Response:     {"jobPostings":[{"id","title","locationName","isRemote","externalLink",...}]}
 
 def _ashby_slug(url: str) -> str | None:
     parsed = urlparse(url)
@@ -318,49 +382,30 @@ def scrape_ashby(url: str, location_re, is_job_match,
     if not slug:
         return None
 
-    api_url = "https://api.ashbyhq.com/posting-public/graphql"
-    query = """
-    query ApiJobBoardWithTeams($organizationHostedJobsPageName: String!) {
-      jobBoard: jobBoardWithTeams(organizationHostedJobsPageName: $organizationHostedJobsPageName) {
-        jobPostings {
-          id title locationName isRemote jobPostingState
-          externalLink
-          team { name }
-        }
-      }
-    }
-    """
-    payload = {
-        "operationName": "ApiJobBoardWithTeams",
-        "variables": {"organizationHostedJobsPageName": slug},
-        "query": query,
-    }
+    api_url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
     log.info("  [Ashby API] slug=%s", slug)
 
     try:
-        r = _SESSION.post(api_url, json=payload, timeout=20)
+        r = _SESSION.get(api_url, timeout=20)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
         log.warning("  [Ashby API] failed: %s", e)
         return None
 
-    postings = (data.get('data', {})
-                    .get('jobBoard', {})
-                    .get('jobPostings', []))
+    # REST API returns jobPostings array
+    postings = data.get('jobPostings', data.get('jobs', []))
 
     results = []
     for p in postings:
-        if p.get('jobPostingState') != 'Published':
-            continue
         title = (p.get('title') or '').strip()
-        if not is_job_match(title):
+        if not _api_job_match(title, is_job_match):
             continue
 
-        loc = (p.get('locationName') or '').strip()
+        loc = (p.get('locationName') or p.get('location') or '').strip()
         if p.get('isRemote') and not loc:
             loc = 'Remote'
-        job_url = p.get('externalLink') or f"https://jobs.ashbyhq.com/{slug}/{p.get('id','')}"
+        job_url = p.get('externalLink') or p.get('jobUrl') or f"https://jobs.ashbyhq.com/{slug}/{p.get('id','')}"
 
         if location_re and loc and not location_re.search(loc):
             log.debug("  [Ashby] ✗ loc: %s — %s", title[:50], loc)
@@ -873,6 +918,703 @@ def scrape_meta(url: str, location_re, is_job_match,
     return results
 
 
+# ── Google ────────────────────────────────────────────────────────────────────
+# URL pattern:  https://www.google.com/about/careers/applications/jobs/results/?q=...&location=...
+# Strategy:     Paginate ?page=N; job data embedded in AF_initDataCallback(key:'ds:1') JSON blob
+# Structure:    data[0] = list of jobs; data[2] = total count; data[3] = page size
+#               job[0]=id, job[1]=title, job[2]=apply_url, job[9]=[[loc_str, ...], ...]
+
+_GOOGLE_DS1_RE = re.compile(
+    r"AF_initDataCallback\(\{key: 'ds:1'.*?data:(.*?)\}\);",
+    re.DOTALL,
+)
+
+
+def _google_extract_jobs(html: str) -> tuple[list, int] | None:
+    """Return (jobs_list, total) from embedded AF_initDataCallback data."""
+    m = _GOOGLE_DS1_RE.search(html)
+    if not m:
+        return None
+    raw_start = m.start(1)
+    depth = 0
+    for i, ch in enumerate(html[raw_start:], raw_start):
+        if ch == '[':
+            depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                raw = html[raw_start:i + 1]
+                break
+    else:
+        return None
+    try:
+        import json
+        d = json.loads(raw)
+    except Exception:
+        return None
+    jobs = d[0] if d and isinstance(d[0], list) else []
+    total = d[2] if len(d) > 2 and isinstance(d[2], int) else 0
+    return jobs, total
+
+
+def scrape_google(url: str, location_re, is_job_match,
+                  log: logging.Logger) -> list[dict] | None:
+    parsed = urlparse(url)
+    qs = dict(pair.split('=', 1) for pair in parsed.query.split('&') if '=' in pair)
+    q = qs.get('q', 'software engineer').replace('+', ' ').replace('%20', ' ')
+    location = qs.get('location', '').replace('+', ' ').replace('%20', ' ')
+
+    base = 'https://www.google.com/about/careers/applications/jobs/results/'
+    log.info('  [Google] q=%r location=%r', q, location)
+
+    results = []
+    page = 1
+
+    while True:
+        params = {'q': q, 'page': page}
+        if location:
+            params['location'] = location
+        page_url = base + '?' + '&'.join(f'{k}={str(v).replace(" ", "+")}' for k, v in params.items())
+
+        html = _curl_get(page_url, log)
+        if not html:
+            break
+
+        extracted = _google_extract_jobs(html)
+        if not extracted:
+            log.warning('  [Google] failed to extract jobs from page %d', page)
+            break
+
+        jobs, total = extracted
+        if not jobs:
+            break
+
+        log.debug('  [Google] page %d: %d jobs (total=%d)', page, len(jobs), total)
+
+        for job in jobs:
+            title = (job[1] or '').strip() if len(job) > 1 else ''
+            apply_url = (job[2] or '').strip() if len(job) > 2 else ''
+            locs_raw = job[9] if len(job) > 9 and job[9] else []
+
+            if not is_job_match(title):
+                continue
+
+            # job[9] is list of location tuples; first element of each is the display string
+            loc_strings = [loc[0] for loc in locs_raw if loc and loc[0]]
+            loc_display = '; '.join(loc_strings)
+
+            if location_re and loc_strings:
+                if not any(location_re.search(ls) for ls in loc_strings):
+                    log.debug('  [Google] ✗ loc: %s — %s', title[:50], loc_display)
+                    continue
+
+            results.append({
+                'title': title,
+                'url': apply_url,
+                'apply_url': apply_url,
+                'location': loc_display,
+                'description': '',
+            })
+
+        if len(jobs) < 20 or len(results) >= total:
+            break
+        page += 1
+
+    return results
+
+
+# ── DoorDash ──────────────────────────────────────────────────────────────────
+# URL pattern:  https://careersatdoordash.com/job-search/
+# Strategy:     Paginate server-rendered HTML at ?spage=N, parse job-item divs
+# Each page:    25 jobs; stop when a page returns 0 job-items
+
+_DD_BASE = 'https://careersatdoordash.com/job-search/'
+_DD_JOB_ITEM_RE  = re.compile(
+    r'class="job-item[^"]*".*?'
+    r'href="(https://careersatdoordash\.com/jobs/[^"]+)"[^>]*>([^<]+)</a>.*?'
+    r'value-secondary">([^<]+)</div>',
+    re.DOTALL,
+)
+
+
+def _curl_get(page_url: str, log: logging.Logger) -> str | None:
+    """Fetch a URL using curl subprocess (bypasses TLS fingerprint blocking)."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['curl', '-s', '-A',
+             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+             '--max-time', '20', page_url],
+            capture_output=True, timeout=25,
+        )
+        return result.stdout.decode('utf-8', errors='replace')
+    except Exception as e:
+        log.warning('  [curl] failed for %s: %s', page_url, e)
+        return None
+
+
+def scrape_doordash(url: str, location_re, is_job_match,
+                    log: logging.Logger) -> list[dict] | None:
+    log.info('  [DoorDash] scraping %s', _DD_BASE)
+    results = []
+
+    page = 1
+    while True:
+        page_url = f'{_DD_BASE}?spage={page}'
+        html = _curl_get(page_url, log)
+        if html is None:
+            break
+
+        items = _DD_JOB_ITEM_RE.findall(html)
+        if not items:
+            break
+
+        for job_url, title, location in items:
+            title = title.strip()
+            location = location.strip()
+
+            if not is_job_match(title):
+                continue
+            if location_re and not location_re.search(location):
+                log.debug('  [DoorDash] ✗ loc: %s — %s', title[:50], location)
+                continue
+
+            results.append({
+                'title': title,
+                'url': job_url,
+                'apply_url': job_url,
+                'location': location,
+                'description': '',
+            })
+
+        log.debug('  [DoorDash] page %d: %d items, %d matching so far', page, len(items), len(results))
+        page += 1
+
+    return results
+
+
+# ── Block.xyz ─────────────────────────────────────────────────────────────────
+# URL pattern:  https://block.xyz/careers/jobs
+# Strategy:     SvelteKit __data.json endpoint; dehydrated flat-array format
+# Each page:    36-50 jobs; paginate until empty
+
+def scrape_block_xyz(url: str, location_re, is_job_match,
+                     log: logging.Logger) -> list[dict] | None:
+    import json as _json
+
+    log.info('  [Block.xyz] scraping %s', url)
+
+    # The __data.json endpoint returns one page of jobs in SvelteKit's dehydrated
+    # flat-array format.  The page= param is currently ignored server-side, so we
+    # make a single request and parse what we get.
+    raw = _curl_get('https://block.xyz/careers/jobs/__data.json', log)
+    if not raw:
+        return None
+
+    try:
+        outer = _json.loads(raw)
+    except Exception as e:
+        log.warning('  [Block.xyz] JSON parse failed: %s', e)
+        return None
+
+    # SvelteKit dehydrated payload: find the node whose flat data has a 'jobs' key
+    flat: list | None = None
+    for node in outer.get('nodes', []):
+        if isinstance(node, dict) and isinstance(node.get('data'), list):
+            d = node['data']
+            if d and isinstance(d[0], dict) and 'jobs' in d[0]:
+                flat = d
+                break
+
+    if not flat:
+        log.warning('  [Block.xyz] could not find jobs node in response')
+        return None
+
+    # Navigate the reference tree
+    root = flat[0]
+    jobs_ref = root.get('jobs')
+    if not isinstance(jobs_ref, int) or jobs_ref >= len(flat):
+        return None
+    jobs_obj = flat[jobs_ref]
+    if not isinstance(jobs_obj, dict):
+        return None
+
+    page_arr_ref = jobs_obj.get('currentPage')
+    if not isinstance(page_arr_ref, int) or page_arr_ref >= len(flat):
+        return None
+    job_indices = flat[page_arr_ref]
+    if not isinstance(job_indices, list):
+        return None
+
+    total = jobs_obj.get('total', 0)
+    log.debug('  [Block.xyz] total jobs on site: %d', total)
+
+    results: list[dict] = []
+    for schema_idx in job_indices:
+        if not isinstance(schema_idx, int) or schema_idx >= len(flat):
+            continue
+        schema = flat[schema_idx]
+        if not isinstance(schema, dict):
+            continue
+
+        def _r(ref, _flat=flat):
+            """Resolve a flat-array index reference to its value."""
+            if isinstance(ref, int) and 0 <= ref < len(_flat):
+                return _flat[ref]
+            return ref
+
+        title = _r(schema.get('title', ''))
+        if not isinstance(title, str) or not title:
+            continue
+        if not is_job_match(title):
+            continue
+
+        location = _r(schema.get('location', ''))
+        if not isinstance(location, str):
+            location = ''
+
+        is_remote = _r(schema.get('isRemote', False))
+        if is_remote and not location:
+            location = 'Remote'
+
+        if not is_remote and location_re and location:
+            if not location_re.search(location):
+                log.debug('  [Block.xyz] ✗ loc: %s — %s', title[:50], location)
+                continue
+
+        job_id = _r(schema.get('id', ''))
+        job_url = f'https://block.xyz/careers/jobs/{job_id}' if job_id else 'https://block.xyz/careers/jobs'
+        results.append({
+            'title': title,
+            'url': job_url,
+            'apply_url': job_url,
+            'location': location,
+            'description': '',
+        })
+
+    log.debug('  [Block.xyz] matching jobs: %d (of %d total)', len(results), len(job_indices))
+    return results
+
+
+# ── Amazon ────────────────────────────────────────────────────────────────────
+# URL pattern:  https://www.amazon.jobs/en/search?base_query=...
+# API:          GET https://www.amazon.jobs/en/search.json
+# Params:       base_query, loc_query, offset, result_limit, sort
+# Response:     {"jobs": [...], "hits": N}
+# Job fields:   title, location, job_path, id, description_short
+
+def scrape_amazon(url: str, location_re, is_job_match,
+                  log: logging.Logger) -> list[dict] | None:
+    # Amazon uses two primary engineering title families:
+    #   "Software Development Engineer" (SDE) — the main Amazon ladder
+    #   "Software Engineer" — used by Twitch, Ring, AWS teams and acquisitions
+    # Run both queries to capture the full picture; deduplicate by job id.
+    _AMAZON_QUERIES = [
+        'software development engineer',
+        'senior software engineer',
+        'principal software engineer',
+    ]
+
+    api_url = 'https://www.amazon.jobs/en/search.json'
+    api_headers = {'Referer': 'https://www.amazon.jobs/en/search',
+                   'X-Requested-With': 'XMLHttpRequest'}
+    page_size = 100
+    seen_ids: set[str] = set()
+    results: list[dict] = []
+
+    for base_query in _AMAZON_QUERIES:
+        offset = 0
+        log.info('  [Amazon] query=%r', base_query)
+
+        while True:
+            params = [
+                ('base_query', base_query),
+                ('offset', offset),
+                ('result_limit', page_size),
+                ('sort', 'relevant'),
+                ('normalized_country_code[]', 'USA'),  # strict US filter
+            ]
+            try:
+                r = _SESSION.get(api_url, params=params, timeout=20, headers=api_headers)
+                r.raise_for_status()
+                data = r.json()
+            except Exception as e:
+                log.warning('  [Amazon] API error at query=%r offset=%d: %s', base_query, offset, e)
+                break
+
+            jobs = data.get('jobs', [])
+            total = data.get('hits', 0)
+            log.debug('  [Amazon] offset=%d/%d page=%d', offset, total, len(jobs))
+
+            if not jobs:
+                break
+
+            for job in jobs:
+                job_id = str(job.get('id') or job.get('id_icims') or '')
+                if job_id and job_id in seen_ids:
+                    continue
+
+                title = (job.get('title') or '').strip()
+                if not title or not is_job_match(title):
+                    continue
+
+                if job_id:
+                    seen_ids.add(job_id)
+
+                location = (job.get('location') or '').strip()
+                # Amazon uses "Virtual" for remote positions
+                is_remote = any(w in location.lower() for w in ('virtual', 'remote'))
+
+                if not is_remote and location_re and location:
+                    if not location_re.search(location):
+                        continue
+
+                job_path = job.get('job_path') or ''
+                job_url = (f'https://www.amazon.jobs{job_path}'
+                           if job_path.startswith('/') else job_path
+                           or 'https://www.amazon.jobs/en/search')
+
+                results.append({
+                    'title': title,
+                    'url': job_url,
+                    'apply_url': job_url,
+                    'location': location,
+                    'description': (job.get('description_short') or '').strip(),
+                })
+
+            offset += len(jobs)
+            if offset >= total or len(jobs) < page_size:
+                break
+
+    log.info('  [Amazon] %d unique matching jobs total', len(results))
+    return results
+
+
+# ── Jane Street ───────────────────────────────────────────────────────────────
+# URL pattern:  https://www.janestreet.com/jobs/main.json
+# API:          Static JSON file, no pagination needed
+# Response:     list of {id, position, category, availability, city, overview}
+# Job URL:      https://www.janestreet.com/join-jane-street/open-roles/{id}/
+
+_JS_TECH_CATEGORIES = {'Technology', 'Cybersecurity', 'Machine Learning', 'Quantitative Research'}
+_JS_ROLE_RE = re.compile(r'\bEngineer\b|\bDeveloper\b|\bArchitect\b|\bProgrammer\b', re.IGNORECASE)
+_JS_EXCLUDE_RE = re.compile(r'\b(Recruiter|Compliance|Legal|Sales|Analyst(?!\s*Engineer)|Finance|HR|Tax|Coordinator|Specialist|Clerk)\b', re.IGNORECASE)
+
+def scrape_janestreet(url: str, location_re, is_job_match,
+                      log: logging.Logger) -> list[dict] | None:
+    log.info('  [JaneStreet] fetching %s', url)
+    try:
+        r = _SESSION.get('https://www.janestreet.com/jobs/main.json', timeout=20)
+        r.raise_for_status()
+        jobs = r.json()
+    except Exception as e:
+        log.warning('  [JaneStreet] fetch failed: %s', e)
+        return None
+
+    results: list[dict] = []
+    for job in jobs:
+        title = (job.get('position') or '').strip()
+        category = (job.get('category') or '').strip()
+        if not title:
+            continue
+        # Jane Street doesn't use seniority prefixes; match tech roles by category + title
+        tech_role = (category in _JS_TECH_CATEGORIES and
+                     bool(_JS_ROLE_RE.search(title)) and
+                     not bool(_JS_EXCLUDE_RE.search(title)))
+        if not tech_role:
+            continue
+
+        location = (job.get('city') or '').strip()
+        is_remote = 'remote' in location.lower()
+
+        if not is_remote and location_re and location:
+            if not location_re.search(location):
+                continue
+
+        job_id = job.get('id', '')
+        job_url = (f'https://www.janestreet.com/join-jane-street/open-roles/{job_id}/'
+                   if job_id else 'https://www.janestreet.com/join-jane-street/open-roles/')
+        results.append({
+            'title': title,
+            'url': job_url,
+            'apply_url': job_url,
+            'location': location,
+            'description': (job.get('overview') or '').strip(),
+        })
+
+    log.info('  [JaneStreet] %d matching jobs (of %d total)', len(results), len(jobs))
+    return results
+
+
+# ── Netflix ────────────────────────────────────────────────────────────────────
+# URL pattern:  https://explore.jobs.netflix.net/api/apply/v2/jobs?domain=netflix.com&query=...
+# API:          GET https://explore.jobs.netflix.net/api/apply/v2/jobs
+# Params:       domain=netflix.com, query, start, num
+# Response:     {"positions": [...], "count": N}
+# Job fields:   id, name, location, locations, tags
+
+_NETFLIX_QUERIES = [
+    'senior software engineer',
+    'staff software engineer',
+    'principal software engineer',
+    'software engineer L5',
+    'software engineer L6',
+]
+_NETFLIX_SENIOR_RE = re.compile(
+    r'\bL[56]\b|\b[56]/[56789]\b|\bSenior\b|\bStaff\b|\bPrincipal\b', re.IGNORECASE
+)
+_NETFLIX_ROLE_RE = re.compile(r'\bSoftware\s*Engineer\b|\bSWE\b|\bSDE\b', re.IGNORECASE)
+
+def scrape_netflix(url: str, location_re, is_job_match,
+                   log: logging.Logger) -> list[dict] | None:
+    # Netflix API caps at 10 results per page; run multiple queries + paginate to get
+    # all L5+ (Senior) and L6 (Staff) software engineering roles.
+    api_url = 'https://explore.jobs.netflix.net/api/apply/v2/jobs'
+    page_size = 10
+    results: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for query in _NETFLIX_QUERIES:
+        start = 0
+        log.info('  [Netflix] query=%r', query)
+
+        while True:
+            params = {'domain': 'netflix.com', 'query': query,
+                      'start': start, 'num': page_size, 'sort_by': 'relevance'}
+            try:
+                r = _SESSION.get(api_url, params=params, timeout=20)
+                r.raise_for_status()
+                data = r.json()
+            except Exception as e:
+                log.warning('  [Netflix] API error query=%r start=%d: %s', query, start, e)
+                break
+
+            positions = data.get('positions', [])
+            total = data.get('count', 0)
+            log.debug('  [Netflix] query=%r start=%d/%d', query, start, total)
+
+            if not positions:
+                break
+
+            for pos in positions:
+                job_id = str(pos.get('id') or '')
+                if job_id and job_id in seen_ids:
+                    continue
+
+                title = (pos.get('name') or pos.get('posting_name') or '').strip()
+                if not title:
+                    continue
+                # Netflix uses level numbers: L5=senior, L6=staff
+                if not _NETFLIX_SENIOR_RE.search(title):
+                    continue
+                if not _NETFLIX_ROLE_RE.search(title):
+                    continue
+
+                if job_id:
+                    seen_ids.add(job_id)
+
+                locs = pos.get('locations') or []
+                location = locs[0] if locs else (pos.get('location') or '')
+                is_remote = 'remote' in location.lower()
+
+                if not is_remote and location_re and location:
+                    if not location_re.search(location):
+                        continue
+
+                job_url = f'https://jobs.netflix.com/jobs/{job_id}' if job_id else 'https://jobs.netflix.com'
+                results.append({
+                    'title': title,
+                    'url': job_url,
+                    'apply_url': job_url,
+                    'location': location,
+                    'description': '',
+                })
+
+            start += len(positions)
+            if start >= total or len(positions) < page_size:
+                break
+
+    log.info('  [Netflix] %d unique matching jobs', len(results))
+    return results
+
+
+# ── TwoSigma ──────────────────────────────────────────────────────────────────
+# TwoSigma uses Avature ATS which doesn't expose a JSON API, but publishes an
+# RSS feed at /careers/OpenRoles/feed/ containing all open positions.
+
+_TS_ROLE_RE = re.compile(
+    r'\bEngineer\b|\bDeveloper\b|\bArchitect\b|\bResearcher\b|\bScientist\b',
+    re.IGNORECASE,
+)
+_TS_EXCLUDE_RE = re.compile(
+    r'\b(Intern|Co-?op|Apprentice|Manager|Director|Recruiter|Coordinator|'
+    r'Analyst(?!\s*Engineer)|Legal|Finance|Accountant|HR\b|People\s+Partner|'
+    r'Compliance|Sales|Marketing|Procurement|Operations|Specialist)\b',
+    re.IGNORECASE,
+)
+
+
+def scrape_twosigma(url: str, location_re, is_job_match,
+                    log: logging.Logger) -> list[dict]:
+    parsed = urlparse(url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    feed_url = f"{base}/careers/OpenRoles/feed/?jobRecordsPerPage=1000"
+    log.debug("  [TwoSigma] fetching RSS %s", feed_url)
+
+    try:
+        r = _SESSION.get(feed_url, timeout=20)
+        r.raise_for_status()
+        root = ET.fromstring(r.text.encode('utf-8'))
+    except Exception as e:
+        log.warning("  [TwoSigma] feed request failed: %s", e)
+        return []
+
+    results = []
+    for item in root.findall('.//item'):
+        title = (item.findtext('title') or '').strip()
+        if not title:
+            continue
+        if not _api_job_match(title, is_job_match):
+            continue
+        if _TS_EXCLUDE_RE.search(title):
+            continue
+
+        job_url = (item.findtext('link') or item.findtext('guid') or '').strip()
+        location = (item.findtext('description') or '').strip()
+        # description is "Country City" e.g. "United States New York City"
+        if location_re and location and not location_re.search(location):
+            # Remote is not listed separately; skip if no match
+            if 'remote' not in location.lower():
+                continue
+
+        results.append({
+            'title': title,
+            'url': job_url,
+            'apply_url': job_url,
+            'location': location,
+            'description': '',
+        })
+
+    log.info('  [TwoSigma] %d matching jobs', len(results))
+    return results
+
+
+# ── HudsonRiverTrading ────────────────────────────────────────────────────────
+# HRT runs a custom WordPress plugin ("hrt-jobs") that exposes all jobs via a
+# WordPress admin-ajax.php handler: action=get_hrt_jobs_handler.
+# The `data` field must be a JSON string (e.g. '{"search":""}').
+# The response is a JSON array; each element has 'title' and 'content' (HTML).
+# Location is embedded in data-term attribute: "new-york===london===singapore".
+
+_HRT_ROLE_RE = re.compile(
+    r'\bEngineer\b|\bDeveloper\b|\bArchitect\b|\bResearcher\b|\bScientist\b',
+    re.IGNORECASE,
+)
+_HRT_EXCLUDE_RE = re.compile(
+    r'\b(Intern|Co-?op|Campus|Recruiter|Coordinator|Manager|Director|'
+    r'Analyst(?!\s*Engineer)|Legal|Finance|Accountant|HR\b|Compliance|'
+    r'Sales|Marketing|Procurement|Operations|Specialist|Trader(?!\s+(?:Engineer|Systems)))\b',
+    re.IGNORECASE,
+)
+
+_HRT_CAREERS_URL = 'https://www.hudsonrivertrading.com/careers/'
+_HRT_AJAX_URL = 'https://www.hudsonrivertrading.com/wp-admin/admin-ajax.php'
+
+
+def scrape_hrt(url: str, location_re, is_job_match,
+               log: logging.Logger) -> list[dict]:
+    log.debug("  [HRT] fetching careers page for settings")
+    try:
+        r = _SESSION.get(_HRT_CAREERS_URL, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        log.warning("  [HRT] careers page request failed: %s", e)
+        return []
+
+    # Extract data-filters-settings from the .hrt-card-wrapper element
+    from html import unescape as _unescape
+    settings_raw = re.findall(r'data-filters-settings="([^"]+)"', r.text)
+    settings = _unescape(settings_raw[0]) if settings_raw else '{}'
+
+    log.debug("  [HRT] calling AJAX endpoint")
+    try:
+        import json as _json
+        resp = _SESSION.post(
+            _HRT_AJAX_URL,
+            data={
+                'action': 'get_hrt_jobs_handler',
+                'data': _json.dumps({'search': ''}),
+                'queryparams': '',
+                'setting': settings,
+            },
+            headers={
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': _HRT_CAREERS_URL,
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        jobs_data = resp.json()
+    except Exception as e:
+        log.warning("  [HRT] AJAX request failed: %s", e)
+        return []
+
+    if not isinstance(jobs_data, list):
+        log.warning("  [HRT] unexpected response type: %s", type(jobs_data))
+        return []
+
+    results = []
+    for job in jobs_data:
+        title = (job.get('title') or '').strip()
+        # Decode HTML entities in title
+        title = re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))), title)
+        title = title.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        if not title:
+            continue
+        if not _api_job_match(title, is_job_match):
+            continue
+        if _HRT_EXCLUDE_RE.search(title):
+            continue
+
+        content = job.get('content', '')
+        # Extract job URL from href
+        link_m = re.search(r'href="(https://www\.hudsonrivertrading\.com/hrt-job/[^"]+)"', content)
+        job_url = link_m.group(1) if link_m else _HRT_CAREERS_URL
+
+        # Extract locations from data-term attribute
+        # e.g. data-term="new-york===london===software-engineeringc"
+        term_m = re.search(r'data-term="([^"]*)"', content)
+        location_parts = []
+        if term_m:
+            for part in term_m.group(1).split('==='):
+                # Map slug to display name; skip non-location terms
+                loc_map = {
+                    'new-york': 'New York', 'new-york-city': 'New York',
+                    'london': 'London', 'singapore': 'Singapore',
+                    'chicago': 'Chicago', 'austin': 'Austin',
+                    'remote': 'Remote', 'san-francisco': 'San Francisco',
+                }
+                if part in loc_map:
+                    location_parts.append(loc_map[part])
+        location = ', '.join(location_parts) if location_parts else 'New York'
+
+        if location_re and location:
+            if not location_re.search(location) and 'remote' not in location.lower():
+                continue
+
+        results.append({
+            'title': title,
+            'url': job_url,
+            'apply_url': job_url,
+            'location': location,
+            'description': (job.get('description') or '').strip(),
+        })
+
+    log.info('  [HRT] %d matching jobs', len(results))
+    return results
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
 def api_scrape(company: str, url: str,
@@ -908,6 +1650,30 @@ def api_scrape(company: str, url: str,
 
     if strategy == 'meta':
         return scrape_meta(url, location_re, is_job_match, log)
+
+    if strategy == 'doordash':
+        return scrape_doordash(url, location_re, is_job_match, log)
+
+    if strategy == 'google':
+        return scrape_google(url, location_re, is_job_match, log)
+
+    if strategy == 'block_xyz':
+        return scrape_block_xyz(url, location_re, is_job_match, log)
+
+    if strategy == 'amazon':
+        return scrape_amazon(url, location_re, is_job_match, log)
+
+    if strategy == 'janestreet':
+        return scrape_janestreet(url, location_re, is_job_match, log)
+
+    if strategy == 'netflix':
+        return scrape_netflix(url, location_re, is_job_match, log)
+
+    if strategy == 'twosigma':
+        return scrape_twosigma(url, location_re, is_job_match, log)
+
+    if strategy == 'hrt':
+        return scrape_hrt(url, location_re, is_job_match, log)
 
     return None   # playwright fallback
 

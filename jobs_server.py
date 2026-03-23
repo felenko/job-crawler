@@ -37,7 +37,8 @@ from build_jobs_browser import (
     MARKER_SCAN,
     collect_browser_data,
 )
-from jobs_db import compute_hash, get_applied_hashes, init_db, mark_applied, unmark_applied
+from jobs_db import (compute_hash, get_applied_hashes, init_db, mark_applied, unmark_applied,
+                     get_rejected_hashes, mark_rejected, unmark_rejected)
 
 app = Flask(__name__, static_folder="jobs_browser", static_url_path="")
 
@@ -238,12 +239,20 @@ def api_jobs():
     """Return current job data by scanning Jobs folder, annotated with applied state."""
     data = collect_browser_data(JOBS_DIR)
     applied = get_applied_hashes()
+    rejected = get_rejected_hashes()
     for company_data in data:
         for job in company_data['jobs']:
             h = compute_hash(company_data['company'], job['title'])
             job['job_hash'] = h
             job['applied'] = h in applied
+            job['rejected'] = h in rejected
     return jsonify(data)
+
+
+@app.route("/api/seeds")
+def api_seeds():
+    """Return all companies from seeds_test.txt as [{name, url}]."""
+    return jsonify([{"name": name, "url": url} for name, url in _parse_seeds_file()])
 
 
 @app.route("/api/applied", methods=["POST", "DELETE"])
@@ -262,6 +271,25 @@ def api_applied():
         )
     else:
         unmark_applied(job_hash)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/rejected", methods=["POST", "DELETE"])
+def api_rejected():
+    """Toggle rejected state. POST to mark, DELETE to unmark. Body: { job_hash, company, title, url }."""
+    body = request.get_json(silent=True) or {}
+    job_hash = (body.get("job_hash") or "").strip()
+    if not job_hash:
+        return jsonify({"ok": False, "message": "job_hash required"}), 400
+    if request.method == "POST":
+        mark_rejected(
+            job_hash,
+            (body.get("company") or "").strip(),
+            (body.get("title") or "").strip(),
+            (body.get("url") or "").strip(),
+        )
+    else:
+        unmark_rejected(job_hash)
     return jsonify({"ok": True})
 
 

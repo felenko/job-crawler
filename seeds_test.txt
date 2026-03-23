@@ -4,50 +4,79 @@ OpenAI, https://openai.com/careers/search/?q=software
 Anthropic, https://www.anthropic.com/careers#open-roles
 Databricks, https://www.databricks.com/company/careers/open-positions?search=software
 Snowflake, https://careers.snowflake.com/us/en/search-results?keywords=software
-Scale, https://scale.com/careers#open-roles
-Palantir, https://www.palantir.com/careers/#openings
+Scale, https://boards.greenhouse.io/scaleai
+Palantir, https://jobs.lever.co/palantir
 NVIDIA, https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite?keywords=software
 # Fintech / Product
 Stripe, https://stripe.com/jobs/search?query=software
 Notion, https://www.notion.so/careers#open-positions
 # Trading / Quant
-JaneStreet, https://www.janestreet.com/join-jane-street/open-roles/
+JaneStreet, https://www.janestreet.com/jobs/main.json
 HudsonRiverTrading, https://www.hudsonrivertrading.com/careers/
-TwoSigma, https://www.twosigma.com/careers/search/?q=software
+TwoSigma, https://careers.twosigma.com/careers/OpenRoles
 Citadel, https://www.citadel.com/careers/open-positions/
-JumpTrading, https://www.jumptrading.com/careers/open-positions/
-DRW, https://drw.com/work-at-drw/listings/
+JumpTrading, https://boards.greenhouse.io/jumptrading
+DRW, https://boards.greenhouse.io/drweng
 Optiver, https://optiver.com/working-at-optiver/career-opportunities/
 # Big Tech
-Google, https://careers.google.com/jobs/results/?q=software%20engineer&location=New%20York
+Google, https://www.google.com/about/careers/applications/jobs/results/?q=software+engineer&location=New+York
 Meta, https://www.metacareers.com/jobs/?q=software
-Apple, https://jobs.apple.com/en-us/search?search=software
-Amazon, https://www.amazon.jobs/en/search?base_query=software%20engineer
-Netflix, https://jobs.netflix.com/search?q=software
+Apple, https://jobs.apple.com/en-us/search?location=united-states-USA&team=apps-frameworks-SFTWR+machine-learning-ai-SFTWR+core-operating-systems-SFTWR+cloud-infrastructure-SFTWR+security-privacy-SFTWR+silicon-technologies-SFTWR+devops-site-reliability-SFTWR
+Amazon, https://www.amazon.jobs/en/search
+Netflix, https://explore.jobs.netflix.net/api/apply/v2/jobs?domain=netflix.com&query=software+engineer
 Microsoft, https://apply.careers.microsoft.com/careers/search
 Uber, https://www.uber.com/us/en/careers/list/?query=software
 Lyft, https://boards.greenhouse.io/lyft
 Airbnb, https://careers.airbnb.com/positions/?_search_input=software
-DoorDash, https://careersatdoordash.com/job-search/?keyword=software&location=remote&spage=1
+DoorDash, https://careersatdoordash.com/job-search/
 # Unicorns
-Figma, https://www.figma.com/careers/#jobs
+Figma, https://boards.greenhouse.io/figma
 Roblox, https://boards.greenhouse.io/roblox
 Rippling, https://www.rippling.com/careers/open-roles
-Gusto, https://gusto.com/about/careers?search=software
-Brex, https://www.brex.com/careers#open-roles
-Ramp, https://ramp.com/careers#jobs
-Chime, https://careers.chime.com/jobs/search?query=software
-Plaid, https://plaid.com/careers/openings/?search=software
+Gusto, https://boards.greenhouse.io/gusto
+Brex, https://boards.greenhouse.io/brex
+Ramp, https://jobs.ashbyhq.com/ramp
+Chime, https://boards.greenhouse.io/chime
+Plaid, https://jobs.lever.co/plaid
 Instacart, https://instacart.careers/current-openings/?search=software
 Coinbase, https://www.coinbase.com/careers/positions?query=software
-Block, https://careers.block.xyz/us/en/search-results?keywords=software
+Block, https://block.xyz/careers/jobs
 # Enterprise / Infra
 Salesforce, https://careers.salesforce.com/en/jobs/?search=software
 ServiceNow, https://careers.servicenow.com/jobs?search=software
 Workday, https://workday.wd5.myworkdayjobs.com/Workday?keywords=software
 Cloudflare, https://www.cloudflare.com/careers/jobs/?search=software
 MongoDB, https://www.mongodb.com/careers/departments/engineering
-Elastic, https://www.elastic.co/careers/jobs?search=software
-Confluent, https://careers.confluent.io/search/?q=software
+Elastic, https://boards.greenhouse.io/elastic
+Confluent, https://jobs.ashbyhq.com/confluent
 Twilio, https://www.twilio.com/company/jobs#openings
-Dropbox, https://jobs.dropbox.com/all-jobs?search=software
+Dropbox, https://boards.greenhouse.io/dropbox
+# Infra Saas
+Datadog, https://www.datadoghq.com/careers/
+HashiCorp, https://www.hashicorp.com/careers
+Vercel, https://vercel.com/careers
+Snyk, https://snyk.io/careers/
+Retool, https://retool.com/careers
+Segment (Twilio Segment), https://segment.com/careers/
+PlanetScale, https://planetscale.com/careers
+# Startup
+Linear, https://linear.app/careers
+Raycast, https://www.raycast.com/careers
+Supabase, https://supabase.com/careers
+Clerk, https://clerk.com/careers
+Neon, https://neon.tech/careers
+Modal, https://modal.com/careers
+Replicate, https://replicate.com/careers
+# Additional Big Tech
+Pinterest, https://www.pinterestcareers.com/jobs/?query=software
+Snap, https://careers.snap.com/jobs?query=software
+LinkedIn, https://careers.linkedin.com/jobs
+X (Twitter), https://careers.x.com/en
+Shopify, https://www.shopify.com/careers/search?query=software
+# AI / Frontier Labs (missing)
+Cohere, https://cohere.com/careers
+Mistral AI, https://mistral.ai/careers
+Perplexity, https://jobs.ashbyhq.com/perplexity
+Inflection AI, https://inflection.ai/careers
+Adept AI, https://www.adept.ai/careers
+Character.AI, https://character.ai/careers
